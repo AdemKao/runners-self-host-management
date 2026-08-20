@@ -1,0 +1,253 @@
+name: Apply issue 6 patch
+
+on:
+  push:
+    branches:
+      - fix/issue-6-launchd-status
+    paths:
+      - .github/workflows/apply-issue-6-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-6-launchd-status
+          fetch-depth: 0
+
+      - name: Apply guarded patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, got {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          frontend_old = '''service_state() {
+            local dir="$1" service=""
+            service="$(cat "$dir/.service" 2>/dev/null || true)"
+            [[ -n "$service" ]] || { printf 'not-installed'; return; }
+            case "$(uname -s)" in
+              Darwin)
+                if launchctl list 2>/dev/null | grep -Fq "$service"; then printf 'running'; else printf 'stopped'; fi
+                ;;
+              Linux)
+                if systemctl is-active --quiet "$service" 2>/dev/null; then printf 'running'; else printf 'stopped'; fi
+                ;;
+              *) printf 'unknown' ;;
+            esac
+          }
+          '''
+
+          frontend_new = '''launchd_service_label() {
+            local service="$1"
+            service="${service##*/}"
+            service="${service%.plist}"
+            printf '%s' "$service"
+          }
+
+          launchd_service_running() {
+            local service="$1" label domain output
+            label="$(launchd_service_label "$service")"
+            [[ -n "$label" ]] || return 1
+            domain="gui/$(id -u)"
+
+            if output="$(launchctl print "$domain/$label" 2>/dev/null)"; then
+              if printf '%s\n' "$output" | grep -Eq '^[[:space:]]*state = running([[:space:]]|$)'; then
+                return 0
+              fi
+              if printf '%s\n' "$output" | grep -Eq '^[[:space:]]*pid = [1-9][0-9]*([[:space:]]|$)'; then
+                return 0
+              fi
+              return 1
+            fi
+
+            launchctl list 2>/dev/null | awk -v label="$label" \
+              '$3 == label && $1 ~ /^[0-9]+$/ { found=1 } END { exit(found ? 0 : 1) }'
+          }
+
+          service_state() {
+            local dir="$1" service=""
+            service="$(cat "$dir/.service" 2>/dev/null || true)"
+            [[ -n "$service" ]] || { printf 'not-installed'; return; }
+            case "$(uname -s)" in
+              Darwin)
+                if launchd_service_running "$service"; then printf 'running'; else printf 'stopped'; fi
+                ;;
+              Linux)
+                if systemctl is-active --quiet "$service" 2>/dev/null; then printf 'running'; else printf 'stopped'; fi
+                ;;
+              *) printf 'unknown' ;;
+            esac
+          }
+          '''
+
+          core_old = '''service_state() {
+            local dir="$1" service=""
+            service="$(cat "$dir/.service" 2>/dev/null || true)"
+            [[ -n "$service" ]] || { echo "not-installed"; return; }
+            case "$(uname -s)" in
+              Darwin)
+                if launchctl list 2>/dev/null | grep -Fq "$service"; then echo "running"; else echo "stopped"; fi
+                ;;
+              Linux)
+                if systemctl is-active --quiet "$service" 2>/dev/null; then echo "running"; else echo "stopped"; fi
+                ;;
+              *) echo "unknown" ;;
+            esac
+          }
+          '''
+
+          core_new = '''launchd_service_label() {
+            local service="$1"
+            service="${service##*/}"
+            service="${service%.plist}"
+            printf '%s' "$service"
+          }
+
+          launchd_service_running() {
+            local service="$1" label domain output
+            label="$(launchd_service_label "$service")"
+            [[ -n "$label" ]] || return 1
+            domain="gui/$(id -u)"
+
+            if output="$(launchctl print "$domain/$label" 2>/dev/null)"; then
+              if printf '%s\n' "$output" | grep -Eq '^[[:space:]]*state = running([[:space:]]|$)'; then
+                return 0
+              fi
+              if printf '%s\n' "$output" | grep -Eq '^[[:space:]]*pid = [1-9][0-9]*([[:space:]]|$)'; then
+                return 0
+              fi
+              return 1
+            fi
+
+            launchctl list 2>/dev/null | awk -v label="$label" \
+              '$3 == label && $1 ~ /^[0-9]+$/ { found=1 } END { exit(found ? 0 : 1) }'
+          }
+
+          service_state() {
+            local dir="$1" service=""
+            service="$(cat "$dir/.service" 2>/dev/null || true)"
+            [[ -n "$service" ]] || { echo "not-installed"; return; }
+            case "$(uname -s)" in
+              Darwin)
+                if launchd_service_running "$service"; then echo "running"; else echo "stopped"; fi
+                ;;
+              Linux)
+                if systemctl is-active --quiet "$service" 2>/dev/null; then echo "running"; else echo "stopped"; fi
+                ;;
+              *) echo "unknown" ;;
+            esac
+          }
+          '''
+
+          replace_once('runnerctl', 'VERSION="0.3.1"', 'VERSION="0.3.2"')
+          replace_once('runnerctl', frontend_old, frontend_new)
+          replace_once('bin/runnerctl', 'VERSION="0.2.0"', 'VERSION="0.3.2"')
+          replace_once('bin/runnerctl', core_old, core_new)
+          replace_once('package.json', '"version": "0.3.1"', '"version": "0.3.2"')
+
+          formula = Path('Formula/runnerctl.rb')
+          f = formula.read_text()
+          if f.count('0.3.1') != 3:
+              raise SystemExit(f"Formula/runnerctl.rb: expected three 0.3.1 occurrences, got {f.count('0.3.1')}")
+          formula.write_text(f.replace('0.3.1', '0.3.2'))
+
+          smoke = Path('tests/smoke.sh')
+          s = smoke.read_text()
+          s = s.replace('0.3.1', '0.3.2')
+          s = s.replace('x.latest_version!=="0.3.2" || !x.update_available', 'x.latest_version!=="0.3.3" || !x.update_available', 1)
+          s = s.replace('RUNNERCTL_LATEST_VERSION=0.3.2 RUNNERCTL_INSTALL_METHOD=shell', 'RUNNERCTL_LATEST_VERSION=0.3.3 RUNNERCTL_INSTALL_METHOD=shell', 1)
+          s = s.replace('RUNNERCTL_LATEST_VERSION=0.3.2 RUNNERCTL_INSTALL_METHOD=homebrew', 'RUNNERCTL_LATEST_VERSION=0.3.3 RUNNERCTL_INSTALL_METHOD=homebrew', 1)
+
+          marker = '''node -e 'const fs=require("fs"); JSON.parse(fs.readFileSync(0,"utf8"))' < <(run auth doctor --json)\n\n'''
+          if s.count(marker) != 1:
+              raise SystemExit('tests/smoke.sh: regression insertion marker mismatch')
+
+          regression = r'''# Regression for issue #6: macOS .service contains an absolute plist path,
+# while launchd addresses the service by its label.
+mkdir -p "$tmp/macos-bin"
+cat > "$tmp/macos-bin/uname" <<'EOF_UNAME'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf 'Darwin\n' ;;
+  -m) printf 'arm64\n' ;;
+  *) printf 'Darwin\n' ;;
+esac
+EOF_UNAME
+chmod +x "$tmp/macos-bin/uname"
+
+cat > "$tmp/macos-bin/launchctl" <<'EOF_LAUNCHCTL'
+#!/usr/bin/env bash
+set -euo pipefail
+label='actions.runner.example-org-example-repo.example-runner-01'
+case "${1:-}" in
+  print)
+    [[ "${2:-}" == gui/*/"$label" ]] || exit 113
+    cat <<EOF_PRINT
+service = $label
+{
+    state = running
+    pid = 4242
+}
+EOF_PRINT
+    ;;
+  list)
+    printf '4242\t0\t%s\n' "$label"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF_LAUNCHCTL
+chmod +x "$tmp/macos-bin/launchctl"
+
+printf '%s\n' '/Users/example/Library/LaunchAgents/actions.runner.example-org-example-repo.example-runner-01.plist' \
+  > "$tmp/data/runners/example-runner-01/.service"
+
+run_macos() {
+  env PATH="$tmp/macos-bin:$tmp/bin:$PATH" RUNNERCTL_HOME="$tmp/data" RUNNERCTL_CONFIG_HOME="$tmp/config" \
+    bash "$ROOT/runnerctl" "$@"
+}
+
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.status!=="running") process.exit(1)' \
+  < <(run_macos status example-runner-01 --json)
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.runners[0].status!=="running") process.exit(1)' \
+  < <(run_macos list --json)
+
+env PATH="$tmp/macos-bin:$tmp/bin:$PATH" RUNNERCTL_HOME="$tmp/data" RUNNERCTL_CONFIG_HOME="$tmp/config" \
+  bash "$ROOT/bin/runnerctl" status example-runner-01 | grep -q '^example-runner-01: running$'
+
+rm -f "$tmp/data/runners/example-runner-01/.service"
+
+'''
+          smoke.write_text(s.replace(marker, marker + regression, 1))
+          PY
+
+      - name: Validate patch
+        shell: bash
+        run: |
+          bash tests/smoke.sh
+          npm pack --dry-run >/dev/null
+          ruby -c Formula/runnerctl.rb
+
+      - name: Commit patch and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/apply-issue-6-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- runnerctl bin/runnerctl package.json Formula/runnerctl.rb tests/smoke.sh .github/workflows/apply-issue-6-fix.yml
+          git diff --cached --check
+          git commit -m "fix: detect macOS launchd runner status correctly"
+          git push origin HEAD:fix/issue-6-launchd-status
