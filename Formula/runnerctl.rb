@@ -8,6 +8,7 @@ class Runnerctl < Formula
 
   def install
     bin.install "bin/runnerctl"
+    chmod 0755, bin/"runnerctl"
   end
 
   test do
