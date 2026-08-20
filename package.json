@@ -22,7 +22,7 @@
   ],
   "scripts": {
     "test": "bash tests/smoke.sh",
-    "prepack": "bash tests/smoke.sh"
+    "prepack": "bash -n runnerctl && bash -n runnerctl-base && bash -n bin/runnerctl && bash -n bin/runnerctl-cleanup && node --check npm/runnerctl.js"
   },
   "repository": {
     "type": "git",
