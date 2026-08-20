@@ -12,6 +12,7 @@ class Runnerctl < Formula
     chmod 0755, libexec/"runnerctl-frontend"
     chmod 0755, libexec/"runnerctl-core"
     bin.write_env_script libexec/"runnerctl-frontend", RUNNERCTL_CORE: libexec/"runnerctl-core"
+    generate_completions_from_executable(bin/"runnerctl", "completion")
   end
 
   test do
