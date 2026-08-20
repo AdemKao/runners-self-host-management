@@ -1,0 +1,43 @@
+{
+  "name": "@ademkao/runnerctl",
+  "version": "0.2.0",
+  "description": "Manage multiple GitHub Actions self-hosted runners on macOS and Linux.",
+  "license": "MIT",
+  "private": false,
+  "bin": {
+    "runnerctl": "bin/runnerctl"
+  },
+  "files": [
+    "bin/runnerctl",
+    "README.md",
+    "README.zh-TW.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bash tests/smoke.sh",
+    "prepack": "bash tests/smoke.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AdemKao/runners-self-host-management.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AdemKao/runners-self-host-management/issues"
+  },
+  "homepage": "https://github.com/AdemKao/runners-self-host-management#readme",
+  "keywords": [
+    "github-actions",
+    "self-hosted-runner",
+    "ci",
+    "devops",
+    "runner",
+    "cli"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
