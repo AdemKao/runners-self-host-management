@@ -30,8 +30,11 @@ run() {
 
 run cleanup --help | grep -q 'post-job hook'
 run add --help | grep -q -- '--cleanup'
-run cleanup enable example-runner-01 >/dev/null
+run completion bash | grep -q 'cleanup add'
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.commands["cleanup status"] || !x.commands["cleanup run"]) process.exit(1)' \
+  < <(run agent --json)
 
+run cleanup enable example-runner-01 >/dev/null
 hook="$tmp/data/hooks/example-runner-01/job-completed-cleanup.sh"
 [[ -x "$hook" ]]
 grep -Fq "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$hook" "$runner/.env"
