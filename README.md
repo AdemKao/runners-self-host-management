@@ -37,7 +37,7 @@ For a fine-grained PAT, GitHub's repository runner registration/remove-token end
 ```bash
 git clone --branch feat/runnerctl-initial https://github.com/AdemKao/runners-self-host-management.git
 cd runners-self-host-management
-./install.sh
+bash install.sh
 ```
 
 If `~/.local/bin` is not already in your `PATH`:
