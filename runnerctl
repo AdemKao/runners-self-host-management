@@ -76,6 +76,20 @@ Disk hygiene:
 EOF
 }
 
+append_agent_cleanup_help() {
+  cat <<'EOF'
+
+Runner cleanup:
+  cleanup status       read-only disk/workspace inspection
+  cleanup enable       mutates local runner config and restarts the service
+  cleanup enable-all   mutates all managed runner configs/services
+  cleanup disable      removes runnerctl's completion hook and restarts service
+  cleanup run          manually removes the selected runner workspace
+
+For unattended automation, prefer `runnerctl cleanup status --json` first.
+EOF
+}
+
 run_base() {
   local base core
   base="$(find_base)"
@@ -88,6 +102,43 @@ exec_base() {
   base="$(find_base)"
   core="$(find_core)"
   RUNNERCTL_CORE="$core" exec bash "$base" "$@"
+}
+
+agent_json_with_cleanup() {
+  run_base agent --json | awk '
+    /"status": \{"effect": "read-only", "json": true\},/ && !added {
+      print
+      print "    \"cleanup status\": {\"effect\": \"read-only\", \"json\": true},"
+      print "    \"cleanup enable\": {\"effect\": \"mutating-local-config-and-service\"},"
+      print "    \"cleanup enable-all\": {\"effect\": \"mutating-local-config-and-service-bulk\"},"
+      print "    \"cleanup disable\": {\"effect\": \"mutating-local-config-and-service\"},"
+      print "    \"cleanup run\": {\"effect\": \"destructive-workspace\"},"
+      added=1
+      next
+    }
+    { print }
+  '
+}
+
+completion_with_cleanup() {
+  local shell="${1:-}"
+  case "$shell" in
+    bash)
+      run_base completion bash | sed 's/commands="add /commands="cleanup add /'
+      ;;
+    zsh)
+      run_base completion zsh | awk '
+        /commands=\(/ && !added { print; print "    '\''cleanup:Manage workspace cleanup'\''"; added=1; next }
+        { print }
+      '
+      ;;
+    fish)
+      run_base completion fish | sed "s/-a 'add /-a 'cleanup add /"
+      ;;
+    *)
+      exec_base completion "$@"
+      ;;
+  esac
 }
 
 run_add_with_cleanup() {
@@ -159,6 +210,21 @@ main() {
         exec bash "$helper" --help
       fi
       exec_base "$@"
+      ;;
+    agent|ai-agent)
+      if [[ "${2:-}" == "--json" ]]; then
+        agent_json_with_cleanup
+      else
+        run_base "$@"
+        append_agent_cleanup_help
+      fi
+      ;;
+    completion)
+      if [[ $# -ge 2 ]]; then
+        completion_with_cleanup "${2:-}"
+      else
+        exec_base "$@"
+      fi
       ;;
     *)
       exec_base "$@"
