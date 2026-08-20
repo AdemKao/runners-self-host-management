@@ -104,6 +104,23 @@ exec_base() {
   RUNNERCTL_CORE="$core" exec bash "$base" "$@"
 }
 
+safe_print() {
+  printf '%s\n' "$1" || true
+}
+
+print_base_with_suffix() {
+  local suffix="$1" output suffix_output
+  shift
+  output="$(run_base "$@")" || return $?
+  case "$suffix" in
+    root) suffix_output="$(append_root_cleanup_help)" ;;
+    add) suffix_output="$(append_add_cleanup_help)" ;;
+    agent) suffix_output="$(append_agent_cleanup_help)" ;;
+    *) suffix_output="" ;;
+  esac
+  printf '%s\n%s\n' "$output" "$suffix_output" || true
+}
+
 agent_json_with_cleanup() {
   run_base agent --json | awk '
     /"status": \{"effect": "read-only", "json": true\},/ && !added {
@@ -136,7 +153,7 @@ completion_with_cleanup() {
       run_base completion fish | sed "s/-a 'add /-a 'cleanup add /"
       ;;
     *)
-      exec_base completion "$@"
+      run_base completion "$@"
       ;;
   esac
 }
@@ -180,18 +197,22 @@ run_add_with_cleanup() {
 }
 
 main() {
-  local cmd="${1:-help}" helper
+  local cmd="${1:-help}" helper output
 
   case "$cmd" in
     cleanup)
       shift
       helper="$(find_cleanup_helper)"
+      if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
+        output="$(bash "$helper" "$@")" || return $?
+        safe_print "$output"
+        return
+      fi
       exec bash "$helper" "$@"
       ;;
     add)
       if [[ " $* " == *" --help "* || " $* " == *" -h "* ]]; then
-        run_base "$@"
-        append_add_cleanup_help
+        print_base_with_suffix add "$@"
         return
       fi
       if [[ " $* " == *" --cleanup "* ]]; then
@@ -201,29 +222,33 @@ main() {
       exec_base "$@"
       ;;
     --help|-h)
-      run_base "$@"
-      append_root_cleanup_help
+      print_base_with_suffix root "$@"
       ;;
     help)
       if [[ "${2:-}" == "cleanup" ]]; then
         helper="$(find_cleanup_helper)"
-        exec bash "$helper" --help
+        output="$(bash "$helper" --help)" || return $?
+        safe_print "$output"
+        return
       fi
-      exec_base "$@"
+      output="$(run_base "$@")" || return $?
+      safe_print "$output"
       ;;
     agent|ai-agent)
       if [[ "${2:-}" == "--json" ]]; then
-        agent_json_with_cleanup
+        output="$(agent_json_with_cleanup)" || return $?
+        safe_print "$output"
       else
-        run_base "$@"
-        append_agent_cleanup_help
+        print_base_with_suffix agent "$@"
       fi
       ;;
     completion)
       if [[ $# -ge 2 ]]; then
-        completion_with_cleanup "${2:-}"
+        output="$(completion_with_cleanup "${2:-}")" || return $?
+        safe_print "$output"
       else
-        exec_base "$@"
+        output="$(run_base "$@")" || return $?
+        safe_print "$output"
       fi
       ;;
     *)
