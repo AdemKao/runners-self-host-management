@@ -53,8 +53,9 @@ curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-managemen
 Tagged releases can be installed by setting `RUNNERCTL_VERSION`. The release installer verifies the published SHA-256 checksum before installation:
 
 ```bash
+VERSION="X.Y.Z"
 curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh \
-  | RUNNERCTL_VERSION=<version> bash
+  | RUNNERCTL_VERSION="$VERSION" bash
 ```
 
 ### npm / pnpm
