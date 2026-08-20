@@ -2,8 +2,16 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+    paths:
+      - 'bin/runnerctl'
+      - 'package.json'
+      - 'scripts/package-release.sh'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,54 +19,83 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Validate version
-        shell: bash
-        run: |
-          cli_version="$(bash bin/runnerctl version)"
-          package_version="$(node -p "require('./package.json').version")"
-          tag_version="${GITHUB_REF_NAME#v}"
-          test "$cli_version" = "$package_version"
-          test "$cli_version" = "$tag_version"
-
-      - name: Run tests
-        run: bash tests/smoke.sh
-
-      - name: Build release artifacts
-        run: bash scripts/package-release.sh
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            dist/runnerctl \
-            dist/runnerctl.sha256 \
-            dist/runnerctl-*.tar.gz \
-            dist/runnerctl-*.tar.gz.sha256 \
-            --title "runnerctl $GITHUB_REF_NAME" \
-            --generate-notes
-
-  npm:
-    needs: release
-    runs-on: ubuntu-latest
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cli_version="$(bash bin/runnerctl version)"
+          package_version="$(node -p "require('./package.json').version")"
+
+          test "$cli_version" = "$package_version"
+
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+            test "${tag#v}" = "$cli_version"
+          else
+            tag="v$cli_version"
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            should_release=false
+          else
+            should_release=true
+          fi
+
+          echo "version=$cli_version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+
+      - name: Release already exists
+        if: steps.version.outputs.should_release != 'true'
+        run: echo "${{ steps.version.outputs.tag }} already exists; nothing to publish."
+
+      - name: Run tests
+        if: steps.version.outputs.should_release == 'true'
+        run: bash tests/smoke.sh
+
+      - name: Build release artifacts
+        if: steps.version.outputs.should_release == 'true'
+        run: bash scripts/package-release.sh
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.should_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          target_args=()
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            target_args+=(--target "$GITHUB_SHA")
+          fi
+
+          gh release create "$tag" \
+            dist/runnerctl \
+            dist/runnerctl.sha256 \
+            dist/runnerctl-*.tar.gz \
+            dist/runnerctl-*.tar.gz.sha256 \
+            --title "runnerctl $tag" \
+            --generate-notes \
+            "${target_args[@]}"
+
       - name: Publish npm package when configured
-        if: env.NODE_AUTH_TOKEN != ''
+        if: steps.version.outputs.should_release == 'true' && env.NODE_AUTH_TOKEN != ''
         run: npm publish --access public
+
       - name: Skip npm publish when NPM_TOKEN is missing
-        if: env.NODE_AUTH_TOKEN == ''
+        if: steps.version.outputs.should_release == 'true' && env.NODE_AUTH_TOKEN == ''
         run: echo 'NPM_TOKEN is not configured; GitHub Release was still published.'
