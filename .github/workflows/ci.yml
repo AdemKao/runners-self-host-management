@@ -9,13 +9,30 @@ permissions:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
       - name: Validate shell syntax
         run: |
           bash -n bin/runnerctl
           bash -n install.sh
+          bash -n scripts/package-release.sh
           bash -n tests/smoke.sh
+
       - name: Run smoke tests
         run: bash tests/smoke.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate npm package
+        run: npm pack --dry-run
+
+      - name: Validate Homebrew formula syntax
+        if: runner.os == 'macOS'
+        run: ruby -c Formula/runnerctl.rb
