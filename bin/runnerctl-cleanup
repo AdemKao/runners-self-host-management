@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
+RUNNERS_DIR="$RUNNERCTL_HOME/runners"
+HOOKS_DIR="$RUNNERCTL_HOME/hooks"
+
+info(){ printf '[runnerctl] %s\n' "$*"; }
+warn(){ printf '[runnerctl] WARN: %s\n' "$*" >&2; }
+die(){ printf '[runnerctl] ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage(){
+  cat <<'EOF'
+Manage automatic self-hosted runner workspace cleanup.
+
+Usage:
+  runnerctl cleanup status [RUNNER] [--json]
+  runnerctl cleanup enable RUNNER
+  runnerctl cleanup enable-all
+  runnerctl cleanup disable RUNNER
+  runnerctl cleanup run RUNNER [--dry-run]
+
+The post-job hook deletes only GITHUB_WORKSPACE. Package-manager caches,
+Docker data, and runner logs are preserved.
+EOF
+}
+
+runner_dir(){ printf '%s/%s' "$RUNNERS_DIR" "$1"; }
+hook_path(){ printf '%s/%s/job-completed-cleanup.sh' "$HOOKS_DIR" "$1"; }
+meta_get(){ awk -F= -v k="$2" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$1/.runnerctl-meta" 2>/dev/null || true; }
+
+require_runner(){
+  local d; d="$(runner_dir "$1")"
+  [[ -d "$d" && -f "$d/.runnerctl-meta" ]] || die "Unknown runner: $1"
+  printf '%s' "$d"
+}
+
+configured_hook(){
+  awk -F= '$1=="ACTIONS_RUNNER_HOOK_JOB_COMPLETED"{sub(/^[^=]*=/,"");print;exit}' "$1/.env" 2>/dev/null || true
+}
+
+restart_service(){
+  local d="$1"
+  [[ -x "$d/svc.sh" && -f "$d/.service" ]] || { warn "runner $(basename "$d") needs a manual restart"; return 0; }
+  if [[ "$(uname -s)" == Linux ]]; then
+    (cd "$d" && sudo ./svc.sh stop >/dev/null 2>&1 || true)
+    (cd "$d" && sudo ./svc.sh start >/dev/null)
+  else
+    (cd "$d" && ./svc.sh stop >/dev/null 2>&1 || true)
+    (cd "$d" && ./svc.sh start >/dev/null)
+  fi
+}
+
+write_hook(){
+  local n="$1" d="$2" h root
+  h="$(hook_path "$n")"; root="$d/_work"
+  mkdir -p "$(dirname "$h")"
+  cat >"$h" <<EOF
+#!/usr/bin/env bash
+set -u
+workspace="\${GITHUB_WORKSPACE:-}"
+root="$root"
+[[ -n "\$workspace" ]] || exit 0
+case "\$workspace" in "\$root"/*) ;; *) printf '[runnerctl-cleanup] refusing path: %s\\n' "\$workspace" >&2; exit 0;; esac
+[[ -d "\$workspace" ]] || exit 0
+before="\$(du -sk "\$workspace" 2>/dev/null | awk '{print \$1}' || printf 0)"
+find "\$workspace" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || printf '[runnerctl-cleanup] partial cleanup failure\\n' >&2
+after="\$(du -sk "\$workspace" 2>/dev/null | awk '{print \$1}' || printf 0)"
+printf '[runnerctl-cleanup] cleaned %s (before=%sKB after=%sKB)\\n' "\$workspace" "\$before" "\$after"
+exit 0
+EOF
+  chmod 0755 "$h"
+}
+
+set_env(){
+  local d="$1" h="$2" cur tmp
+  cur="$(configured_hook "$d")"
+  if [[ -n "$cur" && "$cur" != "$h" ]]; then
+    case "$cur" in "$HOOKS_DIR"/*/job-completed-cleanup.sh) ;; *) die "Custom completion hook already configured: $cur";; esac
+  fi
+  tmp="$(mktemp)"
+  [[ -f "$d/.env" ]] && awk -F= '$1!="ACTIONS_RUNNER_HOOK_JOB_COMPLETED"' "$d/.env" >"$tmp"
+  printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s\n' "$h" >>"$tmp"
+  mv "$tmp" "$d/.env"
+}
+
+enable_one(){
+  local n="$1" d h
+  d="$(require_runner "$n")"; h="$(hook_path "$n")"
+  write_hook "$n" "$d"; set_env "$d" "$h"; restart_service "$d"
+  info "Automatic workspace cleanup enabled: $n"
+}
+
+disable_one(){
+  local n="$1" d h cur tmp
+  d="$(require_runner "$n")"; h="$(hook_path "$n")"; cur="$(configured_hook "$d")"
+  [[ -z "$cur" || "$cur" == "$h" ]] || die "Refusing to remove custom hook: $cur"
+  tmp="$(mktemp)"
+  [[ -f "$d/.env" ]] && awk -F= '$1!="ACTIONS_RUNNER_HOOK_JOB_COMPLETED"' "$d/.env" >"$tmp"
+  mv "$tmp" "$d/.env"
+  rm -f "$h"; rmdir "$(dirname "$h")" 2>/dev/null || true
+  restart_service "$d"; info "Automatic workspace cleanup disabled: $n"
+}
+
+workspace(){
+  local d="$1" repo name
+  repo="$(meta_get "$d" repo)"; [[ "$repo" == */* ]] || return 1
+  name="${repo#*/}"; printf '%s/_work/%s/%s' "$d" "$name" "$name"
+}
+
+workspace_kb(){
+  local w; w="$(workspace "$1" 2>/dev/null || true)"
+  [[ -d "$w" ]] && du -sk "$w" 2>/dev/null | awk '{print $1}' || printf 0
+}
+
+status_one(){
+  local n="$1" json="$2" d h cur enabled=false kb
+  d="$(require_runner "$n")"; h="$(hook_path "$n")"; cur="$(configured_hook "$d")"; kb="$(workspace_kb "$d")"
+  [[ "$cur" == "$h" && -f "$h" ]] && enabled=true
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"name":"%s","enabled":%s,"workspace_kb":%s}\n' "$n" "$enabled" "$kb"
+  else
+    printf '%-38s %-10s %sKB\n' "$n" "$([[ "$enabled" == true ]] && echo enabled || echo disabled)" "$kb"
+  fi
+}
+
+status_all(){
+  local json="$1" d first=1
+  mkdir -p "$RUNNERS_DIR"; shopt -s nullglob
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"runners":['
+    for d in "$RUNNERS_DIR"/*; do
+      [[ -f "$d/.runnerctl-meta" ]] || continue
+      [[ $first -eq 1 ]] || printf ','
+      status_one "$(basename "$d")" 1 | tr -d '\n'; first=0
+    done
+    printf ']}\n'
+  else
+    printf '%-38s %-10s %s\n' NAME CLEANUP WORKSPACE
+    for d in "$RUNNERS_DIR"/*; do [[ -f "$d/.runnerctl-meta" ]] && status_one "$(basename "$d")" 0; done
+  fi
+}
+
+run_one(){
+  local n="$1" dry="$2" d w kb
+  d="$(require_runner "$n")"; w="$(workspace "$d")" || die "Cannot resolve workspace for $n"; kb="$(workspace_kb "$d")"
+  [[ "$dry" -eq 0 ]] || { printf '%s\t%sKB\n' "$w" "$kb"; return; }
+  [[ -d "$w" ]] || { info "Workspace already absent: $w"; return; }
+  find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+  info "Workspace cleaned: $w (${kb}KB before cleanup)"
+}
+
+main(){
+  local cmd="${1:-status}" name="" json=0 dry=0 d
+  shift || true
+  case "$cmd" in
+    help|--help|-h) usage ;;
+    enable) [[ $# -eq 1 ]] || die "cleanup enable requires RUNNER"; enable_one "$1" ;;
+    enable-all)
+      [[ $# -eq 0 ]] || die "cleanup enable-all takes no arguments"
+      mkdir -p "$RUNNERS_DIR"; shopt -s nullglob
+      for d in "$RUNNERS_DIR"/*; do [[ -f "$d/.runnerctl-meta" ]] && enable_one "$(basename "$d")"; done
+      ;;
+    disable) [[ $# -eq 1 ]] || die "cleanup disable requires RUNNER"; disable_one "$1" ;;
+    run)
+      [[ $# -ge 1 ]] || die "cleanup run requires RUNNER"; name="$1"; shift
+      [[ "${1:-}" == "--dry-run" ]] && { dry=1; shift; }
+      [[ $# -eq 0 ]] || die "unknown cleanup run option"
+      run_one "$name" "$dry"
+      ;;
+    status)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in --json) json=1 ;; *) [[ -z "$name" ]] || die "only one RUNNER allowed"; name="$1" ;; esac
+        shift
+      done
+      [[ -n "$name" ]] && status_one "$name" "$json" || status_all "$json"
+      ;;
+    *) die "Unknown cleanup command: $cmd" ;;
+  esac
+}
+main "$@"
