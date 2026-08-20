@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate version
+        shell: bash
+        run: |
+          cli_version="$(bash bin/runnerctl version)"
+          package_version="$(node -p "require('./package.json').version")"
+          tag_version="${GITHUB_REF_NAME#v}"
+          test "$cli_version" = "$package_version"
+          test "$cli_version" = "$tag_version"
+
+      - name: Run tests
+        run: bash tests/smoke.sh
+
+      - name: Build release artifacts
+        run: bash scripts/package-release.sh
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/runnerctl \
+            dist/runnerctl.sha256 \
+            dist/runnerctl-*.tar.gz \
+            dist/runnerctl-*.tar.gz.sha256 \
+            --title "runnerctl $GITHUB_REF_NAME" \
+            --generate-notes
+
+  npm:
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish npm package when configured
+        if: env.NPM_TOKEN != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
+        run: npm publish --access public
+      - name: Skip npm publish when NPM_TOKEN is missing
+        if: env.NPM_TOKEN == ''
+        run: echo 'NPM_TOKEN is not configured; GitHub Release was still published.'
