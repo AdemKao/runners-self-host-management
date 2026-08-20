@@ -22,6 +22,23 @@ find_base() {
   exit 1
 }
 
+find_core() {
+  local candidates=(
+    "${RUNNERCTL_CORE:-}"
+    "$SCRIPT_DIR/bin/runnerctl"
+    "$SCRIPT_DIR/../libexec/runnerctl-core"
+    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-core"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -f "$candidate" ]] || continue
+    printf '%s' "$candidate"
+    return 0
+  done
+  printf 'runnerctl: core executable not found. Reinstall runnerctl.\n' >&2
+  exit 1
+}
+
 find_cleanup_helper() {
   local candidates=(
     "${RUNNERCTL_CLEANUP_HELPER:-}"
@@ -59,10 +76,23 @@ Disk hygiene:
 EOF
 }
 
-run_add_with_cleanup() {
-  local base helper before name dir rc=0
-  local -a args=()
+run_base() {
+  local base core
   base="$(find_base)"
+  core="$(find_core)"
+  RUNNERCTL_CORE="$core" bash "$base" "$@"
+}
+
+exec_base() {
+  local base core
+  base="$(find_base)"
+  core="$(find_core)"
+  RUNNERCTL_CORE="$core" exec bash "$base" "$@"
+}
+
+run_add_with_cleanup() {
+  local helper before name dir rc=0
+  local -a args=()
   helper="$(find_cleanup_helper)"
 
   shift
@@ -77,7 +107,7 @@ run_add_with_cleanup() {
   mkdir -p "$RUNNERS_DIR"
   find "$RUNNERS_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort > "$before"
 
-  if ! bash "$base" add "${args[@]}"; then
+  if ! run_base add "${args[@]}"; then
     rm -f "$before"
     return 1
   fi
@@ -99,8 +129,7 @@ run_add_with_cleanup() {
 }
 
 main() {
-  local cmd="${1:-help}" base helper
-  base="$(find_base)"
+  local cmd="${1:-help}" helper
 
   case "$cmd" in
     cleanup)
@@ -110,7 +139,7 @@ main() {
       ;;
     add)
       if [[ " $* " == *" --help "* || " $* " == *" -h "* ]]; then
-        bash "$base" "$@"
+        run_base "$@"
         append_add_cleanup_help
         return
       fi
@@ -118,10 +147,10 @@ main() {
         run_add_with_cleanup "$@"
         return
       fi
-      exec bash "$base" "$@"
+      exec_base "$@"
       ;;
     --help|-h)
-      bash "$base" "$@"
+      run_base "$@"
       append_root_cleanup_help
       ;;
     help)
@@ -129,10 +158,10 @@ main() {
         helper="$(find_cleanup_helper)"
         exec bash "$helper" --help
       fi
-      exec bash "$base" "$@"
+      exec_base "$@"
       ;;
     *)
-      exec bash "$base" "$@"
+      exec_base "$@"
       ;;
   esac
 }
