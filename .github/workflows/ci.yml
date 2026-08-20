@@ -18,4 +18,4 @@ jobs:
           bash -n install.sh
           bash -n tests/smoke.sh
       - name: Run smoke tests
-        run: ./tests/smoke.sh
+        run: bash tests/smoke.sh
