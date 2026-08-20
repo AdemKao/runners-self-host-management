@@ -53,8 +53,9 @@ curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-managemen
 安裝特定 tagged release 時可指定 `RUNNERCTL_VERSION`。Tagged release 安裝流程會先驗證 SHA-256 checksum：
 
 ```bash
+VERSION="X.Y.Z"
 curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh \
-  | RUNNERCTL_VERSION=<version> bash
+  | RUNNERCTL_VERSION="$VERSION" bash
 ```
 
 ### npm / pnpm
