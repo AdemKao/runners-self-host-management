@@ -50,11 +50,11 @@ The default destination is `~/.local/bin/runnerctl`. Override it with `PREFIX`:
 curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh | PREFIX="$HOME/.local" bash
 ```
 
-For a tagged release, set `RUNNERCTL_VERSION`. Tagged release installation verifies the published SHA-256 checksum before installing:
+Tagged releases can be installed by setting `RUNNERCTL_VERSION`. The release installer verifies the published SHA-256 checksum before installation:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh \
-  | RUNNERCTL_VERSION=0.2.0 bash
+  | RUNNERCTL_VERSION=<version> bash
 ```
 
 ### npm / pnpm
