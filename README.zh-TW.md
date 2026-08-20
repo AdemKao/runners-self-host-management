@@ -7,22 +7,21 @@
 
 `runnerctl` 是一個開源 CLI，用來在單一 macOS 或 Linux 主機上管理多個 GitHub Actions self-hosted runner。
 
-它會自動處理 runner 下載、註冊、背景 service、logs 與多 GitHub 帳號。從 v0.3 開始，CLI 也提供給 AI coding agent 與自動化工具使用的正式 contract。
+它會自動處理 runner 註冊、背景 service、logs、多 GitHub 帳號、自我升級，以及 AI Agent 友善的 CLI discovery。
 
 ## 特色
 
 - 為單一 repository 註冊一個或多個 self-hosted runner。
-- 同一台主機可執行多個 runner instance，讓多個 jobs 並行。
-- macOS 使用 `launchd`，Linux 使用 `systemd`。
-- 支援多個 GitHub CLI 帳號，不自行保存 runner registration token。
-- 可將 repository owner 或個別 repository 對應到指定 GitHub 帳號。
+- 同一台主機執行多個 runner instance，支援 jobs 並行。
+- macOS 使用 `launchd`、Linux 使用 `systemd`。
+- 支援多個 GitHub CLI 帳號與 repository-to-account mapping。
 - 統一管理 start、stop、restart、status、remove。
-- 查看 runner 與 workflow worker diagnostic logs。
-- 類似 Stripe CLI 的可探索 help：`COMMAND --help` 與 `help COMMAND`。
-- AI agent contract：`runnerctl agent` 與 `runnerctl agent --json`。
-- Read-only discovery 指令支援 machine-readable JSON。
-- 支援 Bash、Zsh、Fish completion 產生器。
-- 支援 shell、npm/pnpm、Homebrew/Linuxbrew 安裝，不需要手動 clone repository。
+- 查看 runner 與 workflow worker logs。
+- 類似 Stripe CLI 的 `COMMAND --help` 可探索介面。
+- `runnerctl agent` / `runnerctl agent --json` AI Agent contract。
+- Read-only discovery command 支援穩定 JSON。
+- Bash、Zsh、Fish completion。
+- 支援 Homebrew、npm/pnpm 與 shell installer 自我升級。
 - GitHub Release 提供 SHA-256 checksum。
 
 ## 系統需求
@@ -34,33 +33,31 @@
 - GitHub CLI (`gh`)
 - 對要註冊 runner 的 repository 具備 admin 權限
 
-只有使用 npm / pnpm 安裝時需要 Node.js。Linux service 操作可能需要 `sudo`，因為官方 GitHub runner service script 會使用 systemd。
+只有使用 npm / pnpm 安裝時需要 Node.js。Linux service 操作可能需要 `sudo`。
 
 ## 安裝
 
-### macOS / Linux shell installer
+### Homebrew / Linuxbrew
 
-安裝目前 `main` 版本：
+```bash
+brew tap ademkao/runnerctl https://github.com/AdemKao/runners-self-host-management
+brew install --HEAD ademkao/runnerctl/runnerctl
+```
+
+### macOS / Linux shell installer
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh | bash
 ```
 
-預設會安裝到：
+預設位置：
 
 ```text
 ~/.local/bin/runnerctl
 ~/.local/libexec/runnerctl/runnerctl-core
 ```
 
-自訂 prefix：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh \
-  | PREFIX="$HOME/.local" bash
-```
-
-安裝 tagged release 並驗證 checksum：
+安裝 tagged release 並驗證 SHA-256：
 
 ```bash
 VERSION="X.Y.Z"
@@ -70,19 +67,13 @@ curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-managemen
 
 ### npm / pnpm
 
-不 clone repository，直接從 GitHub 安裝：
-
 ```bash
 npm install -g github:AdemKao/runners-self-host-management
-```
-
-或：
-
-```bash
+# 或
 pnpm add -g github:AdemKao/runners-self-host-management
 ```
 
-Repository 已準備好 npm package `@ademkao/runnerctl`。正式發佈到 npm registry 後可使用：
+npm registry package 發佈後也可使用：
 
 ```bash
 npm install -g @ademkao/runnerctl
@@ -90,32 +81,61 @@ npm install -g @ademkao/runnerctl
 pnpm add -g @ademkao/runnerctl
 ```
 
-### Homebrew / Linuxbrew
+## 升級
+
+只檢查是否有新版，不修改系統：
 
 ```bash
-brew tap ademkao/runnerctl https://github.com/AdemKao/runners-self-host-management
-brew install --HEAD ademkao/runnerctl/runnerctl
+runnerctl upgrade --check
 ```
 
-### 開發安裝
+AI Agent / script 可使用 JSON：
 
 ```bash
-git clone https://github.com/AdemKao/runners-self-host-management.git
-cd runners-self-host-management
-bash install.sh
+runnerctl upgrade --check --json
+```
+
+自動依目前安裝方式升級：
+
+```bash
+runnerctl upgrade
+```
+
+`self-update` 是 alias：
+
+```bash
+runnerctl self-update
+```
+
+CLI 會自動判斷安裝來源：
+
+- Homebrew HEAD：`brew update` + `brew upgrade --fetch-HEAD runnerctl`
+- Homebrew stable：`brew update` + `brew upgrade runnerctl`
+- npm/pnpm：全域安裝最新 tagged GitHub Release
+- shell installer：下載最新 Release，驗證 SHA-256，再更新 frontend/core
+
+### v0.3.0 Homebrew 安裝修復
+
+`v0.3.0` 的 Homebrew formula 使用 `write_env_script` API 方式錯誤，可能讓 `/opt/homebrew/Cellar/runnerctl/.../bin` 變成錯誤的 wrapper path，並在 completion generation 出現 `ENOTDIR`。
+
+因為舊版 `runnerctl` 本身可能已無法正常執行，升到 `v0.3.1` 時需要做一次手動修復：
+
+```bash
+brew update
+brew reinstall --HEAD runnerctl
+runnerctl version
+```
+
+修復後，之後版本直接使用：
+
+```bash
+runnerctl upgrade
 ```
 
 ## 快速開始
 
-先確認主機環境：
-
 ```bash
 runnerctl doctor
-```
-
-如果尚未登入 GitHub CLI：
-
-```bash
 runnerctl auth login
 runnerctl auth list
 ```
@@ -135,13 +155,13 @@ runnerctl add example-org/example-repo \
   --labels local,ci
 ```
 
-查看狀態：
+查看：
 
 ```bash
 runnerctl list
 ```
 
-GitHub Actions workflow 可以使用相同 labels：
+Workflow example：
 
 ```yaml
 jobs:
@@ -152,58 +172,48 @@ jobs:
       - run: ./scripts/test.sh
 ```
 
-一個 runner process 同時間只能執行一個 job。兩個 idle runner instance 就能同時執行兩個符合條件的 jobs。
+一個 runner process 同時處理一個 job；兩個 idle runner 可同時處理兩個符合條件的 jobs。
 
-## 可探索的 Help
-
-根層 help 依用途分組：
+## 可探索 Help
 
 ```bash
 runnerctl --help
-```
-
-重要 command 都有自己的 help：
-
-```bash
 runnerctl add --help
 runnerctl auth --help
-runnerctl auth map --help
+runnerctl upgrade --help
 runnerctl remove --help
 runnerctl help add
 ```
 
-會改變狀態的 command help 會直接列出 `Side effects`，並提供 `AI AGENT` 注意事項，讓人與 agent 在執行前知道風險。
+會改變狀態的 command help 會列出 `Side effects` 與 `AI AGENT` 注意事項。
 
 ## AI Agent 與自動化
 
-`runnerctl` 針對 Codex、Claude Code、OpenCode、Cursor 與其他 coding agent 提供可探索的操作 contract。
-
-人類可讀：
+人類可讀 contract：
 
 ```bash
 runnerctl agent
 ```
 
-Machine-readable：
+Machine-readable contract：
 
 ```bash
 runnerctl agent --json
 ```
 
-Contract 會把 command 分成 read-only、mutating、destructive，並提供 exit code 與建議 discovery sequence。
-
-典型的 agent-safe preflight：
+建議 agent preflight：
 
 ```bash
 runnerctl doctor --json
 runnerctl auth list --json
 runnerctl auth mappings --json
 runnerctl list --json
+runnerctl upgrade --check --json
 runnerctl auth resolve example-org/example-repo --json
 runnerctl add --help
 ```
 
-Agent 讀 logs 時應使用有限輸出：
+Agent 讀 logs 時使用有限輸出：
 
 ```bash
 runnerctl logs example-runner-01 --no-follow
@@ -212,11 +222,9 @@ runnerctl job-logs example-runner-01 --no-follow
 
 除非使用者明確要求移除指定 runner，否則不要使用 `remove --yes`。
 
-Repository 層的 agent 規則放在 [AGENTS.md](AGENTS.md)，可攜式 skill 放在 [skills/runnerctl/SKILL.md](skills/runnerctl/SKILL.md)。`CLAUDE.md` 讓 Claude Code 指向相同的 canonical instructions。
+Repository Agent 規則放在 [AGENTS.md](AGENTS.md)，可攜式 skill 在 [skills/runnerctl/SKILL.md](skills/runnerctl/SKILL.md)。
 
 ## JSON Output
-
-Read-only discovery command 支援穩定 JSON：
 
 ```bash
 runnerctl doctor --json
@@ -227,25 +235,10 @@ runnerctl auth status --json
 runnerctl auth doctor --json
 runnerctl auth mappings --json
 runnerctl auth resolve example-org/example-repo --json
+runnerctl upgrade --check --json
 ```
 
-例如：
-
-```json
-{
-  "runners": [
-    {
-      "name": "example-runner-01",
-      "repository": "example-org/example-repo",
-      "account": "work-account",
-      "status": "running",
-      "labels": ["local", "ci"]
-    }
-  ]
-}
-```
-
-預設仍是給人看的輸出，只有明確指定 `--json` 才使用 structured output。
+預設仍是 human-readable output。
 
 ## 多 GitHub 帳號
 
@@ -254,51 +247,32 @@ runnerctl auth resolve example-org/example-repo --json
 ```bash
 runnerctl auth list
 runnerctl auth status
-```
-
-建立 mapping：
-
-```bash
 runnerctl auth map 'example-org/*' work-account
-runnerctl auth map example-user/example-repo personal-account
-```
-
-確認某個 repository 最後會使用哪個帳號：
-
-```bash
 runnerctl auth resolve example-org/example-repo
 ```
 
 帳號解析順序：
 
-1. command 明確指定的 `--account ACCOUNT`。
-2. 完整 `OWNER/REPO` mapping。
-3. `OWNER/*` mapping。
-4. GitHub CLI 目前 active account。
+1. command 明確指定的 `--account ACCOUNT`
+2. 完整 `OWNER/REPO` mapping
+3. `OWNER/*` mapping
+4. GitHub CLI active account
 
-仍可直接切換 global active account：
+仍可以切換 global active account：
 
 ```bash
 runnerctl auth use work-account
 ```
 
-但這會改變 global `gh` state，所以 agent 或自動化流程應優先使用 mapping 或 `--account`。
+但自動化流程優先使用 mapping 或 `--account`。
 
-### Git 認證是另一套機制
-
-HTTPS remote 可以使用：
+HTTPS Git remote：
 
 ```bash
 runnerctl auth setup-git
 ```
 
-SSH remote 則由 `~/.ssh/config` 決定 SSH key。`runnerctl auth use` 不會切換 SSH key。
-
-查看目前 context：
-
-```bash
-runnerctl auth doctor
-```
+SSH key 仍由 `~/.ssh/config` 控制。
 
 ## Runner Lifecycle
 
@@ -310,11 +284,6 @@ runnerctl stop example-runner-01
 runnerctl restart example-runner-01
 runnerctl start-all
 runnerctl stop-all
-```
-
-互動式移除：
-
-```bash
 runnerctl remove example-runner-01
 ```
 
@@ -326,23 +295,14 @@ runnerctl remove example-runner-01 --yes
 
 ## Logs
 
-Runner connection/service log：
-
 ```bash
 runnerctl logs example-runner-01
-```
-
-Workflow worker log：
-
-```bash
 runnerctl job-logs example-runner-01
 ```
 
-自動化與 AI agent 應使用 `--no-follow`。
+Agent / automation 請使用 `--no-follow`。
 
 ## Shell Completion
-
-產生 completion：
 
 ```bash
 runnerctl completion bash
@@ -350,17 +310,9 @@ runnerctl completion zsh
 runnerctl completion fish
 ```
 
-例如 Zsh：
-
-```bash
-runnerctl completion zsh > ~/.zfunc/_runnerctl
-```
-
-再依照你原本的 shell completion 設定載入即可。
+Homebrew 會自動安裝產生的 Bash、Zsh、Fish completion。
 
 ## 資料位置
-
-預設 runner data：
 
 ```text
 ~/.local/share/runnerctl/
@@ -371,19 +323,8 @@ runnerctl completion zsh > ~/.zfunc/_runnerctl
         ├── _diag/
         ├── _work/
         └── svc.sh
-```
 
-Account mappings：
-
-```text
 ~/.config/runnerctl/accounts.tsv
-```
-
-可自訂：
-
-```bash
-export RUNNERCTL_HOME="$HOME/github-runners"
-export RUNNERCTL_CONFIG_HOME="$HOME/.config/runnerctl"
 ```
 
 ## 並行與隔離
@@ -396,19 +337,19 @@ Docker Compose 建議每個 workflow run 使用不同 project name：
 docker compose -p "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" up -d
 ```
 
-如果 jobs 可能並行，不要共用固定 host port 或 globally named resource。
+如果 jobs 可能並行，不要共用固定 host port 或 global named resource。
 
 ## 安全性
 
-Self-hosted runner 會直接在主機上執行 workflow code。只有可信任的 repositories 與 workflows 才應該連到含有重要 credentials 或資料的 runner host。
+Self-hosted runner 會直接在主機上執行 workflow code。只有可信任的 repository 與 workflow 才應連到含有重要 credentials 或資料的 runner host。
 
-`runnerctl` 只會在需要時取得短效 registration/removal token，不會把 token 寫入 runnerctl mapping 或 metadata。
+Registration/removal token 只在需要時取得，不會持久化到 runnerctl mapping 或 metadata。
 
-完整政策請見 [SECURITY.md](SECURITY.md)。
+詳見 [SECURITY.md](SECURITY.md)。
 
 ## Release 與發佈
 
-新的 public CLI/package version merge 到 `main` 後，可由 release workflow 自動建立 release。流程會確認 public CLI version 與 `package.json` 一致、執行測試，並產生：
+新的 CLI/package version merge 到 `main` 後，在該版本尚未存在 Release 時會觸發 release workflow，驗證版本一致、跑 tests，並產生：
 
 ```text
 runnerctl
@@ -419,11 +360,9 @@ runnerctl-X.Y.Z.tar.gz
 runnerctl-X.Y.Z.tar.gz.sha256
 ```
 
-如果有設定 `NPM_TOKEN`，同一次 release 也會 publish npm package；沒有設定時 GitHub Release 仍可完成，只跳過 npm publish。
+有設定 `NPM_TOKEN` 時也會 publish npm package。
 
 ## 開發
-
-送出變更前：
 
 ```bash
 bash tests/smoke.sh
@@ -435,12 +374,12 @@ ruby -c Formula/runnerctl.rb
 
 ## Roadmap
 
-- Organization-level runner pools 與 runner groups。
-- GitHub-side online / busy health reporting。
-- Host-level concurrency / resource limits。
-- 從 release 自動產生 stable versioned Homebrew formula。
-- Debian (`.deb`) 與 RPM package。
-- 更完整的 runner/account name completion。
+- Organization-level runner pools / runner groups
+- GitHub-side online / busy health reporting
+- Host-level concurrency / resource limits
+- 從 Release 自動產生 stable versioned Homebrew formula
+- Debian (`.deb`) 與 RPM package
+- 更完整的 runner/account completion
 
 ## License
 
