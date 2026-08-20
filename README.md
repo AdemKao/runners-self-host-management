@@ -1,31 +1,98 @@
-# runners-self-host-management
+# runnerctl
 
-`runnerctl` is a local CLI for managing multiple GitHub Actions self-hosted runner instances on one macOS/Linux machine.
+[繁體中文](README.zh-TW.md)
 
-It is optimized for repository-level runners and multi-account GitHub setups, including environments where different repositories belong to different GitHub accounts or organizations.
+![CI](https://github.com/AdemKao/runners-self-host-management/actions/workflows/ci.yml/badge.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
+`runnerctl` is a small open-source CLI for managing multiple GitHub Actions self-hosted runner instances on a single macOS or Linux host.
+
+It is designed for developers and small teams that want local or dedicated CI capacity without manually repeating GitHub's runner setup commands for every repository and runner instance.
 
 ## Features
 
-- Install 1..N runner instances for one repository.
-- Manage multiple GitHub CLI accounts from `runnerctl`.
-- Map `OWNER/REPO` or `OWNER/*` to a specific GitHub account.
-- Use a mapped/specified account without globally switching `gh` active account.
-- Request short-lived runner registration/remove tokens on demand.
-- Never persist GitHub registration tokens or long-lived PATs.
-- Install runners through GitHub's official `svc.sh` integration (`launchd` on macOS, `systemd` on Linux).
+- Register one or many self-hosted runners for a repository.
+- Run multiple runner instances concurrently on the same host.
+- Manage runners as background services with `launchd` on macOS and `systemd` on Linux.
+- Manage multiple GitHub CLI accounts without storing long-lived credentials.
+- Map repository owners or individual repositories to specific GitHub accounts.
 - Start, stop, restart, inspect, and remove runners from one CLI.
-- Tail runner (`Runner_*.log`) and job worker (`Worker_*.log`) diagnostics.
+- Tail runner and workflow worker diagnostic logs.
+- Install from shell, npm/pnpm, or Homebrew HEAD without manually cloning the repository.
+- Build tagged GitHub Releases with SHA-256 checksums.
 
 ## Requirements
 
+Runtime requirements:
+
 - macOS (Apple Silicon or Intel) or Linux (x64/arm64)
-- `bash`
+- Bash
 - `curl`
 - `tar`
-- GitHub CLI: `gh`
-- Repository admin permission for each repository where you register a repository-level runner
+- GitHub CLI (`gh`)
+- repository admin permission for repositories where runners are registered
 
-## Install locally
+`npm` or `pnpm` is only required when installing through the Node package ecosystem.
+
+## Installation
+
+### macOS / Linux installer
+
+Install the current `main` version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh | bash
+```
+
+The default destination is `~/.local/bin/runnerctl`. Override it with `PREFIX`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh | PREFIX="$HOME/.local" bash
+```
+
+For a tagged release, set `RUNNERCTL_VERSION`. Tagged release installation verifies the published SHA-256 checksum before installing:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh \
+  | RUNNERCTL_VERSION=0.2.0 bash
+```
+
+### npm / pnpm
+
+Install directly from GitHub without cloning:
+
+```bash
+npm install -g github:AdemKao/runners-self-host-management
+```
+
+or:
+
+```bash
+pnpm add -g github:AdemKao/runners-self-host-management
+```
+
+The repository is also prepared for publishing as `@ademkao/runnerctl` on npm. Once a package release is published, the standard registry commands are:
+
+```bash
+npm install -g @ademkao/runnerctl
+# or
+pnpm add -g @ademkao/runnerctl
+```
+
+### Homebrew / Linuxbrew
+
+The repository contains a HEAD formula. Add the repository as a custom tap and install the current source version:
+
+```bash
+brew tap ademkao/runnerctl https://github.com/AdemKao/runners-self-host-management
+brew install --HEAD ademkao/runnerctl/runnerctl
+```
+
+This works with Homebrew on macOS and Linuxbrew on Linux.
+
+### Development checkout
+
+For contributors:
 
 ```bash
 git clone https://github.com/AdemKao/runners-self-host-management.git
@@ -33,145 +100,54 @@ cd runners-self-host-management
 bash install.sh
 ```
 
-If `~/.local/bin` is not already in your `PATH`:
+## Quick start
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Verify:
+Check your environment:
 
 ```bash
 runnerctl doctor
-runnerctl version
 ```
 
-## Multi-account GitHub auth
-
-Login to each GitHub account once:
+Authenticate GitHub CLI if needed:
 
 ```bash
 runnerctl auth login
-```
-
-Run it again for additional accounts. GitHub CLI stores the credentials in its normal credential store; `runnerctl` does not copy or persist those tokens.
-
-List authenticated accounts:
-
-```bash
 runnerctl auth list
 ```
 
-Show full GitHub CLI auth status:
+Optionally map repositories to different GitHub accounts:
 
 ```bash
-runnerctl auth status
+runnerctl auth map 'example-org/*' work-account
+runnerctl auth map 'example-user/*' personal-account
 ```
 
-Explicitly switch the globally active GitHub CLI account:
+Create two concurrent runners for a repository:
 
 ```bash
-runnerctl auth use AdemKao
-```
-
-Configure Git over HTTPS to use GitHub CLI as the Git credential helper:
-
-```bash
-runnerctl auth setup-git
-```
-
-Inspect current auth/Git context:
-
-```bash
-runnerctl auth doctor
-```
-
-### Repository-to-account mappings
-
-Map an entire owner/organization:
-
-```bash
-runnerctl auth map 'Claire-s-English/*' claire-work
-runnerctl auth map 'AdemKao/*' AdemKao
-```
-
-Or override one repository:
-
-```bash
-runnerctl auth map Claire-s-English/billing-platform billing-admin
-```
-
-Exact repository mappings take precedence over `OWNER/*` mappings.
-
-List mappings:
-
-```bash
-runnerctl auth mappings
-```
-
-Resolve which account a repository will use:
-
-```bash
-runnerctl auth resolve Claire-s-English/billing-platform
-```
-
-Remove a mapping:
-
-```bash
-runnerctl auth unmap 'Claire-s-English/*'
-```
-
-Mappings are stored locally at:
-
-```text
-~/.config/runnerctl/accounts.tsv
-```
-
-Only account names are stored there. Tokens are never stored by `runnerctl`.
-
-## Add runners
-
-If a mapping exists, no account option is required:
-
-```bash
-runnerctl add Claire-s-English/billing-platform \
+runnerctl add example-org/example-repo \
   --count 2 \
-  --labels local,billing-platform
+  --labels local,ci
 ```
 
-`runnerctl` resolves the account in this order:
-
-1. `--account ACCOUNT`
-2. exact `OWNER/REPO` mapping
-3. `OWNER/*` mapping
-4. current active `gh` account
-
-You can always override it:
+Inspect them:
 
 ```bash
-runnerctl add Claire-s-English/billing-platform \
-  --account claire-work \
-  --count 2 \
-  --name-prefix billing-local \
-  --labels local,billing
+runnerctl list
 ```
 
-The selected account is used only for the GitHub API calls required by that command. `runnerctl add --account ...` does **not** change the globally active `gh` account.
-
-The runner metadata records which account created it so `runnerctl remove` can normally use the same account later.
-
-## Workflow example
+A workflow can target the pool with matching labels:
 
 ```yaml
 jobs:
   test:
-    runs-on: [self-hosted, local, billing]
+    runs-on: [self-hosted, local, ci]
     steps:
       - uses: actions/checkout@v4
-      - run: pnpm test
+      - run: ./scripts/test.sh
 ```
 
-If two matching runners are idle, two jobs can execute concurrently.
+If both matching runners are idle, two jobs can execute concurrently.
 
 ## Commands
 
@@ -203,100 +179,112 @@ runnerctl remove RUNNER [--yes] [--account ACCOUNT]
 runnerctl version
 ```
 
-## Local layout
+## Multiple GitHub accounts
 
-Runner data:
+GitHub CLI can keep more than one account authenticated for the same host. `runnerctl` uses those existing credentials and does not persist the tokens itself.
+
+List accounts:
+
+```bash
+runnerctl auth list
+```
+
+Change the active `gh` account explicitly:
+
+```bash
+runnerctl auth use work-account
+```
+
+For runner operations, it is usually better to map repositories instead of repeatedly changing the global active account:
+
+```bash
+runnerctl auth map 'example-org/*' work-account
+runnerctl auth map example-user/example-repo personal-account
+```
+
+Resolution order is:
+
+1. `--account ACCOUNT` passed to the command;
+2. exact `OWNER/REPO` mapping;
+3. `OWNER/*` mapping;
+4. active GitHub CLI account.
+
+Check which account will be used:
+
+```bash
+runnerctl auth resolve example-org/example-repo
+```
+
+Mappings contain account names only. Credentials remain managed by GitHub CLI.
+
+### Git authentication versus GitHub CLI authentication
+
+`gh` authentication and Git SSH authentication are separate concerns.
+
+For HTTPS remotes, you can configure Git to use GitHub CLI credentials:
+
+```bash
+runnerctl auth setup-git
+```
+
+For SSH remotes, the SSH key is selected by your SSH configuration. `runnerctl auth use` does not change `~/.ssh/config` or SSH keys.
+
+Use:
+
+```bash
+runnerctl auth doctor
+```
+
+to inspect the active GitHub account, Git protocol, current repository remote, and resolved runner account.
+
+## Runner storage
+
+By default runner data lives under:
 
 ```text
 ~/.local/share/runnerctl/
 ├── cache/
-│   └── actions-runner-osx-arm64-<version>.tar.gz
 └── runners/
-    ├── billing-local-01/
+    ├── example-runner-01/
     │   ├── .runnerctl-meta
     │   ├── _diag/
     │   ├── _work/
-    │   ├── config.sh
-    │   ├── run.sh
     │   └── svc.sh
-    └── billing-local-02/
+    └── example-runner-02/
 ```
 
-Account mappings:
+Account mappings live separately under:
 
 ```text
-~/.config/runnerctl/
-└── accounts.tsv
+~/.config/runnerctl/accounts.tsv
 ```
 
-Override the locations:
+Change these locations with:
 
 ```bash
 export RUNNERCTL_HOME="$HOME/github-runners"
 export RUNNERCTL_CONFIG_HOME="$HOME/.config/runnerctl"
 ```
 
-## Authentication model
-
-For a mapped or explicit account, `runnerctl` asks GitHub CLI for that account's stored credential and passes it to `gh api` only through the command environment.
-
-```text
-gh credential store
-       |
-       +-- AdemKao
-       +-- claire-work
-              |
-              v
-runnerctl resolves repository -> account
-              |
-              v
-gh auth token --user <account>
-              |
-              v
-GH_TOKEN=<ephemeral-in-process> gh api ...
-              |
-              v
-short-lived runner registration token
-              |
-              v
-config.sh
-```
-
-The temporary runner registration/remove token is never written to runnerctl configuration.
-
-## Git authentication vs GitHub CLI authentication
-
-`runnerctl auth use ACCOUNT` changes the active **GitHub CLI** account.
-
-For HTTPS Git remotes, you can use:
-
-```bash
-runnerctl auth setup-git
-```
-
-which delegates to `gh auth setup-git`.
-
-For SSH remotes, account/key selection is controlled by SSH configuration, usually `~/.ssh/config`. Switching the active `gh` account does not switch SSH keys. `runnerctl auth doctor` warns when it detects an SSH remote.
-
 ## Logs
 
-Runner connection/service diagnostics:
+Runner connection and service diagnostics:
 
 ```bash
-runnerctl logs billing-local-01
+runnerctl logs example-runner-01
 ```
 
 Latest workflow worker diagnostics:
 
 ```bash
-runnerctl job-logs billing-local-01
+runnerctl job-logs example-runner-01
 ```
 
-Add `--no-follow` to print the last 200 lines and exit.
+Add `--no-follow` to print the latest 200 lines and exit.
 
-## Concurrency notes
+## Concurrency and isolation
 
-Multiple runner instances on the same host can execute jobs concurrently, but they share CPU, RAM, disk, Docker, and network resources.
+Multiple runner instances on one machine can execute jobs concurrently, but they still share CPU, RAM, disk, Docker, and network resources.
 
 For Docker Compose based CI, use a unique project name per workflow run:
 
@@ -304,20 +292,59 @@ For Docker Compose based CI, use a unique project name per workflow run:
 docker compose -p "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" up -d
 ```
 
-Avoid binding identical fixed host ports from concurrent jobs unless the test setup allocates unique ports.
+Avoid fixed host ports or globally named resources when multiple jobs may run at the same time.
 
 ## Security
 
-A self-hosted runner executes workflow code directly on the host. Only attach trusted repositories/workflows to machines containing valuable credentials or local data, and be especially careful with untrusted pull requests.
+A self-hosted runner executes workflow code directly on its host machine. Only attach trusted repositories and workflows to machines containing valuable credentials or local data.
 
-Do not commit GitHub PATs, runner registration tokens, or GitHub CLI credential files to this repository.
+`runnerctl` intentionally does not persist GitHub registration or removal tokens. It requests short-lived tokens through the selected GitHub CLI account when required.
+
+See [SECURITY.md](SECURITY.md) for the security policy and reporting guidance.
+
+## Releases and distribution
+
+Tags matching `v*` trigger the release workflow. A release validates that the Git tag, CLI version, and npm package version match, then creates:
+
+```text
+runnerctl
+runnerctl.sha256
+runnerctl-<version>.tar.gz
+runnerctl-<version>.tar.gz.sha256
+```
+
+If the repository has an `NPM_TOKEN` secret configured, the same tagged workflow also publishes the npm package. Without that secret, the GitHub Release still succeeds and npm publishing is skipped.
+
+## Development
+
+Run the smoke test suite:
+
+```bash
+bash tests/smoke.sh
+```
+
+Validate npm packaging:
+
+```bash
+npm pack --dry-run
+```
+
+Validate the Homebrew formula:
+
+```bash
+ruby -c Formula/runnerctl.rb
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## Roadmap
 
 - Organization-level runner pools and runner groups.
-- Better SSH alias/account diagnostics for multi-key setups.
-- `runnerctl add --repo-url ...` convenience parsing.
-- Resource/concurrency limits per local host.
-- GitHub-side online/busy health summary.
-- Runner package checksum verification.
-- Brew formula/release packaging.
+- GitHub-side online/busy health reporting.
+- Host-level concurrency and resource limits.
+- Stable Homebrew tap formula generated from releases.
+- Debian (`.deb`) and RPM packages.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
