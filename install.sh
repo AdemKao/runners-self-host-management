@@ -5,8 +5,13 @@ REPO="${RUNNERCTL_REPO:-AdemKao/runners-self-host-management}"
 REF="${RUNNERCTL_REF:-main}"
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
-LOCAL_SOURCE="${SCRIPT_DIR:+$SCRIPT_DIR/bin/runnerctl}"
+SCRIPT_DIR=""
+LOCAL_SOURCE=""
+
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  LOCAL_SOURCE="$SCRIPT_DIR/bin/runnerctl"
+fi
 
 info() { printf '[runnerctl-install] %s\n' "$*"; }
 die() { printf '[runnerctl-install] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -19,13 +24,13 @@ install_binary() {
 }
 
 install_from_checkout() {
-  [[ -n "${LOCAL_SOURCE:-}" && -f "$LOCAL_SOURCE" ]] || return 1
+  [[ -n "$LOCAL_SOURCE" && -f "$LOCAL_SOURCE" ]] || return 1
   info "Installing from local checkout"
   install_binary "$LOCAL_SOURCE"
 }
 
 install_from_release() {
-  local version="$1" base tmp checksum_file
+  local version="$1" base tmp
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   base="https://github.com/$REPO/releases/download/v$version"
@@ -45,7 +50,7 @@ install_from_release() {
   install_binary "$tmp/runnerctl"
 }
 
-install_from_main() {
+install_from_ref() {
   local tmp url
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
@@ -65,7 +70,7 @@ main() {
     install_from_release "$RUNNERCTL_VERSION"
   else
     command -v curl >/dev/null 2>&1 || die "curl is required"
-    install_from_main
+    install_from_ref
   fi
 
   case ":$PATH:" in
