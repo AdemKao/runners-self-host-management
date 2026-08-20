@@ -10,6 +10,10 @@ bash -n "$ROOT/scripts/package-release.sh"
 bash "$ROOT/bin/runnerctl" --help | grep -q 'runnerctl auth list'
 bash "$ROOT/bin/runnerctl" --help | grep -q -- '--account ACCOUNT'
 
+if command -v node >/dev/null 2>&1; then
+  [[ "$(node "$ROOT/npm/runnerctl.js" version)" == "$(bash "$ROOT/bin/runnerctl" version)" ]]
+fi
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
