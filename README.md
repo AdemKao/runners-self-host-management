@@ -5,25 +5,24 @@
 ![CI](https://github.com/AdemKao/runners-self-host-management/actions/workflows/ci.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-`runnerctl` is an open-source CLI for managing multiple GitHub Actions self-hosted runner instances on a single macOS or Linux host.
+`runnerctl` is an open-source CLI for managing multiple GitHub Actions self-hosted runners on a single macOS or Linux host.
 
-It automates runner download, registration, background service management, logs, and multi-account GitHub authentication. Starting with v0.3, the CLI also exposes a first-class contract for AI coding agents and automation tools.
+It automates runner registration, background services, logs, multi-account GitHub authentication, upgrades, and agent-friendly discovery.
 
 ## Highlights
 
 - Register one or many self-hosted runners for a repository.
-- Run multiple runner instances concurrently on the same host.
-- Use `launchd` on macOS and `systemd` on Linux.
-- Work with multiple GitHub CLI accounts without storing runner registration tokens.
-- Map repository owners or individual repositories to GitHub accounts.
-- Start, stop, restart, inspect, and remove runners from one CLI.
-- Read runner and workflow worker diagnostic logs.
-- Stripe-style command discovery with `COMMAND --help` and `help COMMAND`.
-- AI-agent contract with `runnerctl agent` and `runnerctl agent --json`.
-- Machine-readable JSON for read-only discovery commands.
-- Bash, Zsh, and Fish completion generation.
-- Install through shell, npm/pnpm, or Homebrew/Linuxbrew without manually cloning the repository.
-- GitHub Releases include SHA-256 checksums.
+- Run multiple runner instances concurrently on one host.
+- Manage services with `launchd` on macOS and `systemd` on Linux.
+- Support multiple GitHub CLI accounts and repository-to-account mappings.
+- Start, stop, restart, inspect, and remove runners.
+- Read runner and workflow worker logs.
+- Stripe-style `COMMAND --help` discovery.
+- AI-agent contract via `runnerctl agent` and `runnerctl agent --json`.
+- Stable JSON for read-only discovery commands.
+- Bash, Zsh, and Fish completion.
+- Self-upgrade support for Homebrew, npm/pnpm, and shell installs.
+- GitHub Release artifacts with SHA-256 checksums.
 
 ## Requirements
 
@@ -32,32 +31,30 @@ It automates runner download, registration, background service management, logs,
 - `curl`
 - `tar`
 - GitHub CLI (`gh`)
-- repository admin permission for repositories where runners are registered
+- repository admin permission where a runner is registered
 
-Node.js is only required when installing from npm/pnpm. Linux service operations may require `sudo` because the official GitHub runner service script uses systemd.
+Node.js is only required for npm/pnpm installation. Linux service operations may require `sudo`.
 
 ## Installation
 
-### macOS / Linux shell installer
+### Homebrew / Linuxbrew
 
-Install the current `main` version:
+```bash
+brew tap ademkao/runnerctl https://github.com/AdemKao/runners-self-host-management
+brew install --HEAD ademkao/runnerctl/runnerctl
+```
+
+### macOS / Linux shell installer
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh | bash
 ```
 
-The default destination is:
+Default layout:
 
 ```text
 ~/.local/bin/runnerctl
 ~/.local/libexec/runnerctl/runnerctl-core
-```
-
-Use a custom prefix when needed:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh \
-  | PREFIX="$HOME/.local" bash
 ```
 
 Install a tagged release with checksum verification:
@@ -70,19 +67,13 @@ curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-managemen
 
 ### npm / pnpm
 
-Install directly from GitHub:
-
 ```bash
 npm install -g github:AdemKao/runners-self-host-management
-```
-
-or:
-
-```bash
+# or
 pnpm add -g github:AdemKao/runners-self-host-management
 ```
 
-The repository is prepared for the npm package `@ademkao/runnerctl`. Once published to the npm registry:
+When the npm registry package is published:
 
 ```bash
 npm install -g @ademkao/runnerctl
@@ -90,39 +81,66 @@ npm install -g @ademkao/runnerctl
 pnpm add -g @ademkao/runnerctl
 ```
 
-### Homebrew / Linuxbrew
+## Upgrade
 
-Install the HEAD formula from this repository:
+Check for an update without changing anything:
 
 ```bash
-brew tap ademkao/runnerctl https://github.com/AdemKao/runners-self-host-management
-brew install --HEAD ademkao/runnerctl/runnerctl
+runnerctl upgrade --check
 ```
 
-### Development checkout
+Machine-readable check for agents and scripts:
 
 ```bash
-git clone https://github.com/AdemKao/runners-self-host-management.git
-cd runners-self-host-management
-bash install.sh
+runnerctl upgrade --check --json
+```
+
+Upgrade using the detected installation method:
+
+```bash
+runnerctl upgrade
+```
+
+`self-update` is an alias:
+
+```bash
+runnerctl self-update
+```
+
+The CLI detects the installation method and uses the appropriate path:
+
+- Homebrew HEAD: `brew update` + `brew upgrade --fetch-HEAD runnerctl`
+- Homebrew stable: `brew update` + `brew upgrade runnerctl`
+- npm/pnpm: installs the latest tagged GitHub release globally
+- shell installer: downloads the latest release and verifies SHA-256 before replacing the frontend/core
+
+### Recovering from v0.3.0 Homebrew installation
+
+`v0.3.0` used the Homebrew `write_env_script` API incorrectly, which can leave `/opt/homebrew/Cellar/runnerctl/.../bin` as an invalid wrapper path and cause `ENOTDIR` during completion generation.
+
+Because the installed `runnerctl` itself may be broken, repair it once after `v0.3.1` is available:
+
+```bash
+brew update
+brew reinstall --HEAD runnerctl
+runnerctl version
+```
+
+After that, future upgrades can use:
+
+```bash
+runnerctl upgrade
 ```
 
 ## Quick start
 
-Check the host first:
-
 ```bash
 runnerctl doctor
-```
-
-Authenticate GitHub CLI if needed:
-
-```bash
 runnerctl auth login
 runnerctl auth list
 ```
 
-For multiple GitHub accounts, map repositories to accounts:
+For multiple GitHub accounts, use generic repository mappings:
 
 ```bash
 runnerctl auth map 'example-org/*' work-account
@@ -143,7 +161,7 @@ Inspect them:
 runnerctl list
 ```
 
-A workflow can target the labels:
+Workflow example:
 
 ```yaml
 jobs:
@@ -154,33 +172,24 @@ jobs:
       - run: ./scripts/test.sh
 ```
 
-One configured runner process can execute one job at a time. Two idle runner instances allow two matching jobs to run concurrently.
+One runner process executes one job at a time. Two idle runner instances can run two matching jobs concurrently.
 
 ## Discoverable help
 
-The root help is grouped by purpose:
-
 ```bash
 runnerctl --help
-```
-
-Every important command exposes focused help:
-
-```bash
 runnerctl add --help
 runnerctl auth --help
-runnerctl auth map --help
+runnerctl upgrade --help
 runnerctl remove --help
 runnerctl help add
 ```
 
-Mutation help includes a `Side effects` section and an `AI AGENT` note so both humans and agents can understand the risk before running a command.
+Mutation help includes `Side effects` and `AI AGENT` guidance.
 
 ## AI agents and automation
 
-`runnerctl` is designed to be discoverable by coding agents such as Codex, Claude Code, OpenCode, Cursor, and other automation systems.
-
-Human-readable agent guidance:
+Human-readable contract:
 
 ```bash
 runnerctl agent
@@ -192,15 +201,14 @@ Machine-readable contract:
 runnerctl agent --json
 ```
 
-The contract classifies commands as read-only, mutating, or destructive, documents exit codes, and recommends a discovery sequence before mutations.
-
-A typical agent-safe preflight is:
+Recommended agent preflight:
 
 ```bash
 runnerctl doctor --json
 runnerctl auth list --json
 runnerctl auth mappings --json
 runnerctl list --json
+runnerctl upgrade --check --json
 runnerctl auth resolve example-org/example-repo --json
 runnerctl add --help
 ```
@@ -214,11 +222,9 @@ runnerctl job-logs example-runner-01 --no-follow
 
 Do not use `remove --yes` unless removal of that exact runner is explicitly intended.
 
-Repository-level agent instructions are available in [AGENTS.md](AGENTS.md). A portable skill is available at [skills/runnerctl/SKILL.md](skills/runnerctl/SKILL.md). `CLAUDE.md` points Claude Code to the same canonical instructions.
+Repository-level instructions are in [AGENTS.md](AGENTS.md). A portable skill is available at [skills/runnerctl/SKILL.md](skills/runnerctl/SKILL.md).
 
 ## JSON output
-
-Read-only discovery commands provide stable JSON intended for agents and scripts:
 
 ```bash
 runnerctl doctor --json
@@ -229,64 +235,34 @@ runnerctl auth status --json
 runnerctl auth doctor --json
 runnerctl auth mappings --json
 runnerctl auth resolve example-org/example-repo --json
-```
-
-Example:
-
-```json
-{
-  "runners": [
-    {
-      "name": "example-runner-01",
-      "repository": "example-org/example-repo",
-      "account": "work-account",
-      "status": "running",
-      "labels": ["local", "ci"]
-    }
-  ]
-}
+runnerctl upgrade --check --json
 ```
 
 Human-readable output remains the default.
 
 ## Multi-account GitHub authentication
 
-`runnerctl` uses accounts already authenticated by GitHub CLI and does not store GitHub access tokens itself.
+`runnerctl` uses accounts already authenticated by GitHub CLI and does not store GitHub access tokens.
 
 ```bash
 runnerctl auth list
 runnerctl auth status
-```
-
-Create mappings:
-
-```bash
 runnerctl auth map 'example-org/*' work-account
-runnerctl auth map example-user/example-repo personal-account
-```
-
-Resolve the effective account:
-
-```bash
 runnerctl auth resolve example-org/example-repo
 ```
 
-Account resolution order is:
+Resolution order:
 
-1. Explicit `--account ACCOUNT` when the command supports it.
+1. Explicit `--account ACCOUNT` when supported.
 2. Exact `OWNER/REPO` mapping.
 3. `OWNER/*` mapping.
 4. Active GitHub CLI account.
 
-Changing the active account is still available:
+Changing the global active account is available but less automation-friendly:
 
 ```bash
 runnerctl auth use work-account
 ```
-
-This changes global `gh` state, so mappings or an explicit `--account` are preferred for automation.
-
-### Git authentication is separate
 
 For HTTPS Git remotes:
 
@@ -294,13 +270,7 @@ For HTTPS Git remotes:
 runnerctl auth setup-git
 ```
 
-For SSH remotes, key selection is controlled by `~/.ssh/config`. `runnerctl auth use` does not switch SSH keys.
-
-Inspect the current context with:
-
-```bash
-runnerctl auth doctor
-```
+SSH key selection remains controlled by `~/.ssh/config`.
 
 ## Runner lifecycle
 
@@ -312,15 +282,10 @@ runnerctl stop example-runner-01
 runnerctl restart example-runner-01
 runnerctl start-all
 runnerctl stop-all
-```
-
-Remove a runner interactively:
-
-```bash
 runnerctl remove example-runner-01
 ```
 
-Skip confirmation only when the removal is intentional:
+Skip removal confirmation only when intentional:
 
 ```bash
 runnerctl remove example-runner-01 --yes
@@ -328,23 +293,14 @@ runnerctl remove example-runner-01 --yes
 
 ## Logs
 
-Follow the runner connection/service log:
-
 ```bash
 runnerctl logs example-runner-01
-```
-
-Follow the latest workflow worker log:
-
-```bash
 runnerctl job-logs example-runner-01
 ```
 
-For automation, always prefer `--no-follow`.
+For automation, use `--no-follow`.
 
 ## Shell completion
-
-Generate completion scripts:
 
 ```bash
 runnerctl completion bash
@@ -352,17 +308,9 @@ runnerctl completion zsh
 runnerctl completion fish
 ```
 
-For example, with Zsh:
-
-```bash
-runnerctl completion zsh > ~/.zfunc/_runnerctl
-```
-
-Add the generated script using the normal completion setup for your shell.
+Homebrew installs generated Bash, Zsh, and Fish completions automatically.
 
 ## Data layout
-
-Default runner data:
 
 ```text
 ~/.local/share/runnerctl/
@@ -373,24 +321,13 @@ Default runner data:
         ├── _diag/
         ├── _work/
         └── svc.sh
-```
 
-Account mappings:
-
-```text
 ~/.config/runnerctl/accounts.tsv
-```
-
-Override locations with:
-
-```bash
-export RUNNERCTL_HOME="$HOME/github-runners"
-export RUNNERCTL_CONFIG_HOME="$HOME/.config/runnerctl"
 ```
 
 ## Parallel jobs and isolation
 
-Runner instances on the same host share CPU, RAM, disk, Docker, and network resources.
+Runners on one host share CPU, RAM, disk, Docker, and networking.
 
 For Docker Compose jobs, use a unique project name:
 
@@ -398,19 +335,19 @@ For Docker Compose jobs, use a unique project name:
 docker compose -p "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" up -d
 ```
 
-Avoid fixed host ports and globally named resources when jobs may execute concurrently.
+Avoid fixed host ports and globally named resources when jobs can run concurrently.
 
 ## Security
 
-Self-hosted runners execute workflow code directly on the host. Only attach trusted repositories and workflows to machines containing valuable credentials or data.
+Self-hosted runners execute workflow code directly on the host. Attach only trusted repositories and workflows to machines containing valuable credentials or data.
 
-`runnerctl` requests short-lived GitHub runner registration/removal tokens only when needed. Those tokens are not written into runnerctl mappings or metadata.
+Registration/removal tokens are requested only when needed and are not persisted in runnerctl mappings or metadata.
 
-See [SECURITY.md](SECURITY.md) for the security policy.
+See [SECURITY.md](SECURITY.md).
 
 ## Release and distribution
 
-A new public CLI/package version merged to `main` can trigger the release workflow. The workflow validates the public CLI version against `package.json`, runs tests, and creates artifacts such as:
+A new CLI/package version merged to `main` triggers the release workflow when no release for that version exists. It validates CLI/package version consistency, runs tests, and creates:
 
 ```text
 runnerctl
@@ -421,11 +358,9 @@ runnerctl-X.Y.Z.tar.gz
 runnerctl-X.Y.Z.tar.gz.sha256
 ```
 
-If `NPM_TOKEN` is configured, the same release also publishes the npm package. Otherwise the GitHub Release still completes and npm publishing is skipped.
+If `NPM_TOKEN` is configured, the npm package is published too.
 
 ## Development
-
-Before submitting changes:
 
 ```bash
 bash tests/smoke.sh
@@ -439,8 +374,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 
 - Organization-level runner pools and runner groups.
 - GitHub-side online/busy health reporting.
-- Host-level concurrency and resource limits.
-- Stable versioned Homebrew formula generation from releases.
+- Host-level concurrency/resource limits.
+- Stable versioned Homebrew formula generated from releases.
 - Debian (`.deb`) and RPM packages.
 - Richer completion for runner/account names.
 
