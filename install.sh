@@ -28,6 +28,13 @@ install_files() {
   info "Installed runnerctl core to $LIBEXEC_DIR/runnerctl-core"
 }
 
+install_legacy_binary() {
+  local source="$1"
+  mkdir -p "$BIN_DIR"
+  install -m 0755 "$source" "$BIN_DIR/runnerctl"
+  info "Installed legacy runnerctl to $BIN_DIR/runnerctl"
+}
+
 install_from_checkout() {
   [[ -n "$LOCAL_FRONTEND" && -f "$LOCAL_FRONTEND" && -f "$LOCAL_CORE" ]] || return 1
   info "Installing from local checkout"
@@ -54,12 +61,16 @@ install_from_release() {
   info "Downloading runnerctl v$version"
   curl -fsSL "$base/runnerctl" -o "$tmp/runnerctl"
   curl -fsSL "$base/runnerctl.sha256" -o "$tmp/runnerctl.sha256"
-  curl -fsSL "$base/runnerctl-core" -o "$tmp/runnerctl-core"
-  curl -fsSL "$base/runnerctl-core.sha256" -o "$tmp/runnerctl-core.sha256"
-
   verify_sha256 "$tmp" runnerctl.sha256
-  verify_sha256 "$tmp" runnerctl-core.sha256
-  install_files "$tmp/runnerctl" "$tmp/runnerctl-core"
+
+  if curl -fsSL "$base/runnerctl-core" -o "$tmp/runnerctl-core" 2>/dev/null; then
+    curl -fsSL "$base/runnerctl-core.sha256" -o "$tmp/runnerctl-core.sha256"
+    verify_sha256 "$tmp" runnerctl-core.sha256
+    install_files "$tmp/runnerctl" "$tmp/runnerctl-core"
+  else
+    info "Release v$version uses the legacy single-file layout"
+    install_legacy_binary "$tmp/runnerctl"
+  fi
 }
 
 install_from_ref() {
