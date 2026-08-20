@@ -2,16 +2,25 @@
 
 This repository is intentionally designed to be worked on by AI coding agents as well as humans.
 
-## First commands
+## Start with the CLI contract
 
-Before changing code, inspect the CLI contract:
+Before changing code or runner state, inspect the public CLI contract:
 
 ```bash
 bash runnerctl agent
 bash runnerctl agent --json
+bash runnerctl --help
 ```
 
-Then run the existing tests:
+For any command that may mutate state, read its focused help first:
+
+```bash
+bash runnerctl add --help
+bash runnerctl auth --help
+bash runnerctl remove --help
+```
+
+Then run the existing tests before and after user-facing changes:
 
 ```bash
 bash tests/smoke.sh
@@ -23,20 +32,38 @@ bash tests/smoke.sh
 - Do not add real company names, customer names, private repository names, usernames, tokens, machine names, or credentials to documentation, fixtures, or tests.
 - Never persist GitHub runner registration/removal tokens. They must remain short-lived and obtained only when needed.
 - Preserve support for macOS and Linux.
-- Preserve multi-account GitHub CLI behavior; do not assume the globally active `gh` account is always the correct account.
+- Preserve shell, npm/pnpm, and Homebrew/Linuxbrew distribution paths.
+- Preserve multi-account GitHub CLI behavior; do not assume the globally active `gh` account is always correct.
 - Prefer non-interactive, deterministic CLI behavior that is safe for automation.
-- Add structured output when an agent needs to parse a command reliably.
+- Prefer stable `--json` output when an agent or script needs to parse a command reliably.
+- Keep human-readable output as the default unless the command is explicitly machine-oriented.
 - Treat commands that remove runners or change global authentication state as higher-risk mutations.
-- Do not silently bypass `sudo`, operating-system permissions, or GitHub permission failures.
+- Do not silently bypass `sudo`, operating-system permissions, GitHub permission failures, or interactive privilege prompts.
 - Maintain meaningful non-zero exit codes for failed operations.
+- When public CLI behavior changes, update both `README.md` and `README.zh-TW.md`.
+
+## Public frontend and internal core
+
+The installed public command is:
+
+```text
+runnerctl
+```
+
+The source tree contains:
+
+```text
+runnerctl             public frontend: help, agent contract, JSON, completion
+bin/runnerctl         internal runner/service implementation core
+```
+
+Distribution code must install both files. Do not change a packaging path in a way that installs only the core or only the frontend.
 
 ## Change workflow
 
-For code changes:
-
-1. Read the relevant implementation and tests.
+1. Read the relevant implementation, tests, and command help.
 2. Make the smallest coherent change.
-3. Update English and Traditional Chinese documentation when user-facing behavior changes.
+3. Update English and Traditional Chinese docs for user-facing behavior.
 4. Run:
 
 ```bash
@@ -45,28 +72,43 @@ npm pack --dry-run
 ruby -c Formula/runnerctl.rb
 ```
 
-5. Do not publish a release by manually changing tags unless release behavior is part of the requested work.
+5. Check that `package.json` and the public `runnerctl version` remain consistent for releases.
+6. Do not manually create or move release tags unless release behavior is explicitly part of the requested work.
 
-## CLI safety classification
+## Safe discovery commands
 
-Read-only / discovery commands may normally be used to understand state:
+Prefer structured output for agent automation:
 
 ```text
-runnerctl doctor
-runnerctl auth list
-runnerctl auth status
-runnerctl auth doctor
-runnerctl auth mappings
-runnerctl auth resolve OWNER/REPO
-runnerctl list
-runnerctl status [RUNNER]
-runnerctl logs RUNNER --no-follow
-runnerctl job-logs RUNNER --no-follow
-runnerctl version
+runnerctl doctor --json
+runnerctl auth list --json
+runnerctl auth status --json
+runnerctl auth doctor --json
+runnerctl auth mappings --json
+runnerctl auth resolve OWNER/REPO --json
+runnerctl list --json
+runnerctl status RUNNER --json
 runnerctl agent --json
 ```
 
-Mutating commands change local configuration, GitHub registration, or service state. Confirm they match the user's request before running them.
+Logs are read-only but follow indefinitely by default. Agents must use:
+
+```text
+runnerctl logs RUNNER --no-follow
+runnerctl job-logs RUNNER --no-follow
+```
+
+## Mutation classes
+
+Mutating commands change local configuration, GitHub registration, or host service state. Confirm they match the user's request before running them.
+
+Changing the global GitHub CLI account is a global mutation:
+
+```text
+runnerctl auth use ACCOUNT
+```
+
+Prefer repository mappings or explicit `--account` when global switching is unnecessary.
 
 The destructive command is:
 
@@ -74,7 +116,7 @@ The destructive command is:
 runnerctl remove RUNNER --yes
 ```
 
-Only use it when removal is explicitly intended.
+Only use `--yes` when removal of that exact runner is explicitly intended.
 
 ## Agent skill
 
@@ -84,7 +126,7 @@ A portable agent skill is provided at:
 skills/runnerctl/SKILL.md
 ```
 
-Agents operating an installed CLI should prefer the live contract from:
+Agents operating an installed CLI should prefer the live contract:
 
 ```bash
 runnerctl agent --json
