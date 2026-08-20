@@ -17,6 +17,7 @@ For any command that may mutate state, read its focused help first:
 ```bash
 bash runnerctl add --help
 bash runnerctl auth --help
+bash runnerctl upgrade --help
 bash runnerctl remove --help
 ```
 
@@ -38,26 +39,27 @@ bash tests/smoke.sh
 - Prefer stable `--json` output when an agent or script needs to parse a command reliably.
 - Keep human-readable output as the default unless the command is explicitly machine-oriented.
 - Treat commands that remove runners or change global authentication state as higher-risk mutations.
+- Treat `runnerctl upgrade --check` as read-only and `runnerctl upgrade` / `runnerctl self-update` as installation mutations.
 - Do not silently bypass `sudo`, operating-system permissions, GitHub permission failures, or interactive privilege prompts.
 - Maintain meaningful non-zero exit codes for failed operations.
 - When public CLI behavior changes, update both `README.md` and `README.zh-TW.md`.
 
 ## Public frontend and internal core
 
-The installed public command is:
-
 ```text
-runnerctl
-```
-
-The source tree contains:
-
-```text
-runnerctl             public frontend: help, agent contract, JSON, completion
+runnerctl             public frontend: help, agent contract, JSON, completion, upgrade
 bin/runnerctl         internal runner/service implementation core
 ```
 
 Distribution code must install both files. Do not change a packaging path in a way that installs only the core or only the frontend.
+
+For Homebrew wrappers, use the documented Pathname form:
+
+```ruby
+(bin/"runnerctl").write_env_script(...)
+```
+
+Do not call `bin.write_env_script(...)`; that treats the `bin` directory itself as the script path.
 
 ## Change workflow
 
@@ -72,12 +74,12 @@ npm pack --dry-run
 ruby -c Formula/runnerctl.rb
 ```
 
-5. Check that `package.json` and the public `runnerctl version` remain consistent for releases.
+5. Check that `package.json`, Homebrew tests, and public `runnerctl version` remain consistent.
 6. Do not manually create or move release tags unless release behavior is explicitly part of the requested work.
 
 ## Safe discovery commands
 
-Prefer structured output for agent automation:
+Prefer structured output:
 
 ```text
 runnerctl doctor --json
@@ -88,6 +90,7 @@ runnerctl auth mappings --json
 runnerctl auth resolve OWNER/REPO --json
 runnerctl list --json
 runnerctl status RUNNER --json
+runnerctl upgrade --check --json
 runnerctl agent --json
 ```
 
@@ -98,9 +101,27 @@ runnerctl logs RUNNER --no-follow
 runnerctl job-logs RUNNER --no-follow
 ```
 
+## Upgrade behavior
+
+Before upgrading, prefer:
+
+```bash
+runnerctl upgrade --check --json
+```
+
+If an update is available and the user wants it installed:
+
+```bash
+runnerctl upgrade
+```
+
+`runnerctl self-update` is an alias. The CLI detects Homebrew, npm, pnpm, or shell installation and uses the matching update path.
+
+A broken pre-v0.3.1 Homebrew installation cannot self-update because the old wrapper may not execute; repair it once with Homebrew, then use `runnerctl upgrade` for later versions.
+
 ## Mutation classes
 
-Mutating commands change local configuration, GitHub registration, or host service state. Confirm they match the user's request before running them.
+Mutating commands change local configuration, GitHub registration, host service state, or the runnerctl installation. Confirm they match the user's request before running them.
 
 Changing the global GitHub CLI account is a global mutation:
 

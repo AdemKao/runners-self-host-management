@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 RUNNERS_DIR="$RUNNERCTL_HOME/runners"
 RUNNERCTL_CONFIG_HOME="${RUNNERCTL_CONFIG_HOME:-$HOME/.config/runnerctl}"
 ACCOUNT_MAP_FILE="$RUNNERCTL_CONFIG_HOME/accounts.tsv"
 GITHUB_HOST="${RUNNERCTL_GITHUB_HOST:-${GH_HOST:-github.com}}"
+RUNNERCTL_REPO="${RUNNERCTL_REPO:-AdemKao/runners-self-host-management}"
 
 find_core() {
   local candidates=(
@@ -43,6 +44,7 @@ json_quote() {
 
 json_csv_array() {
   local value="${1:-}" first=1 item
+  local -a items=()
   printf '['
   IFS=',' read -r -a items <<< "$value"
   for item in "${items[@]}"; do
@@ -105,10 +107,14 @@ Lifecycle:
 Authentication:
   auth           Manage GitHub CLI accounts and repository mappings
 
+Maintenance:
+  upgrade        Check for or install the latest runnerctl release
+  self-update    Alias for upgrade
+  completion     Generate shell completion
+
 Diagnostics & Automation:
   doctor         Check the local runnerctl environment
   agent          Show the AI-agent automation contract
-  completion     Generate shell completion
 
 Other:
   help           Help about any command
@@ -307,7 +313,7 @@ Side effects:
   MUTATING host service state. Linux may invoke sudo.
 
 AI AGENT:
-  Inspect `runnerctl status RUNNER` before changing service state.
+  Inspect \`runnerctl status RUNNER\` before changing service state.
 EOF
       ;;
     start-all|stop-all)
@@ -321,7 +327,7 @@ Side effects:
   MUTATING host service state for multiple runners. Linux may invoke sudo.
 
 AI AGENT:
-  Inspect `runnerctl list --json` first because this affects all managed runners.
+  Inspect \`runnerctl list --json\` first because this affects all managed runners.
 EOF
       ;;
     remove)
@@ -341,6 +347,41 @@ Side effects:
 
 AI AGENT:
   Never use --yes unless removal of that exact runner was explicitly requested.
+EOF
+      ;;
+    upgrade|self-update)
+      cat <<'EOF'
+Check for or install the latest runnerctl release.
+
+Usage:
+  runnerctl upgrade
+  runnerctl upgrade --check
+  runnerctl upgrade --check --json
+  runnerctl self-update
+
+Behavior:
+  - Homebrew HEAD: `brew update` then `brew upgrade --fetch-HEAD runnerctl`
+  - Homebrew stable: `brew update` then `brew upgrade runnerctl`
+  - pnpm: installs the latest tagged GitHub release globally
+  - npm: installs the latest tagged GitHub release globally
+  - shell installer: downloads the latest release, verifies SHA-256, and replaces
+    the installed frontend/core using install.sh
+
+Flags:
+  --check      Only check whether an update is available
+  --json       Machine-readable output; requires --check
+  -h, --help   Show help
+
+Environment overrides (primarily for testing/advanced automation):
+  RUNNERCTL_LATEST_VERSION
+  RUNNERCTL_INSTALL_METHOD
+  RUNNERCTL_INSTALL_PREFIX
+
+Side effects:
+  `--check` is read-only. Without `--check`, this command mutates the installed CLI.
+
+AI AGENT:
+  Prefer `runnerctl upgrade --check --json` before upgrading.
 EOF
       ;;
     completion)
@@ -384,18 +425,21 @@ Recommended discovery sequence:
   2. runnerctl auth list --json
   3. runnerctl auth mappings --json
   4. runnerctl list --json
-  5. runnerctl auth resolve OWNER/REPO --json
-  6. runnerctl COMMAND --help before a mutation
+  5. runnerctl upgrade --check --json
+  6. runnerctl auth resolve OWNER/REPO --json
+  7. runnerctl COMMAND --help before a mutation
 
 Read-only / discovery:
   doctor, list, status
   auth list, auth status, auth doctor, auth mappings, auth resolve
+  upgrade --check
   logs --no-follow, job-logs --no-follow
   version, agent, completion
 
 Mutating:
   auth use, auth login, auth setup-git, auth map, auth unmap
   add, start, stop, restart, start-all, stop-all
+  upgrade, self-update
 
 Destructive:
   remove
@@ -404,7 +448,7 @@ Agent rules:
   - Perform read-only discovery before mutation.
   - Never invent repository, account, runner, or label identifiers.
   - Prefer --account or repository mappings over changing global gh state.
-  - Do not use `auth use` unless changing the global active account is intended.
+  - Use `runnerctl upgrade --check --json` before upgrading when practical.
   - Use --no-follow when reading logs in unattended automation.
   - Never use `remove --yes` without explicit intent for that exact runner.
   - Never print, persist, or commit registration/removal tokens.
@@ -414,10 +458,6 @@ Agent rules:
 
 Machine-readable contract:
   runnerctl agent --json
-
-Generic example:
-  runnerctl auth map 'example-org/*' work-account
-  runnerctl add example-org/example-repo --count 2 --labels local,ci --account work-account
 EOF
 }
 
@@ -434,6 +474,7 @@ agent_json() {
     "runnerctl auth list --json",
     "runnerctl auth mappings --json",
     "runnerctl list --json",
+    "runnerctl upgrade --check --json",
     "runnerctl auth resolve OWNER/REPO --json"
   ],
   "commands": {
@@ -445,6 +486,9 @@ agent_json() {
     "auth doctor": {"effect": "read-only", "json": true},
     "auth mappings": {"effect": "read-only", "json": true},
     "auth resolve": {"effect": "read-only", "json": true},
+    "upgrade --check": {"effect": "read-only-network", "json": true},
+    "upgrade": {"effect": "mutating-installation"},
+    "self-update": {"effect": "mutating-installation", "alias_for": "upgrade"},
     "logs": {"effect": "read-only", "non_blocking_flag": "--no-follow"},
     "job-logs": {"effect": "read-only", "non_blocking_flag": "--no-follow"},
     "auth use": {"effect": "mutating-global"},
@@ -465,6 +509,7 @@ agent_json() {
     "Perform read-only discovery before mutation",
     "Never invent repository, account, runner, or label identifiers",
     "Prefer --account or repository mappings over changing global gh state",
+    "Check upgrade status before upgrading when practical",
     "Use --no-follow for logs in unattended automation",
     "Require explicit intent before remove --yes",
     "Never print, persist, or commit GitHub registration/removal tokens",
@@ -516,7 +561,8 @@ cmd_status_json() {
   [[ -n "$name" ]] || usage_error "status --json requires RUNNER"
   dir="$RUNNERS_DIR/$name"
   [[ -f "$dir/.runnerctl-meta" ]] || { printf 'runnerctl: unknown runner: %s\n' "$name" >&2; exit 1; }
-  repo="$(meta_get "$dir" repo)"; account="$(meta_get "$dir" account)"; labels="$(meta_get "$dir" labels)"; status="$(service_state "$dir")"
+  repo="$(meta_get "$dir" repo)"; account="$(meta_get "$dir" account)"
+  labels="$(meta_get "$dir" labels)"; status="$(service_state "$dir")"
   printf '{"name":'; json_quote "$name"
   printf ',"repository":'; json_quote "$repo"
   printf ',"account":'; json_quote "$account"
@@ -580,14 +626,211 @@ cmd_auth_doctor_json() {
   printf '}\n'
 }
 
+normalize_version() {
+  local version="${1#v}"
+  printf '%s' "${version%%-*}"
+}
+
+version_is_newer() {
+  local lhs rhs lmaj lmin lpat rmaj rmin rpat
+  lhs="$(normalize_version "$1")"
+  rhs="$(normalize_version "$2")"
+  IFS=. read -r lmaj lmin lpat <<< "$lhs"
+  IFS=. read -r rmaj rmin rpat <<< "$rhs"
+  lmaj="${lmaj:-0}"; lmin="${lmin:-0}"; lpat="${lpat:-0}"
+  rmaj="${rmaj:-0}"; rmin="${rmin:-0}"; rpat="${rpat:-0}"
+  (( 10#$lmaj > 10#$rmaj )) && return 0
+  (( 10#$lmaj < 10#$rmaj )) && return 1
+  (( 10#$lmin > 10#$rmin )) && return 0
+  (( 10#$lmin < 10#$rmin )) && return 1
+  (( 10#$lpat > 10#$rpat ))
+}
+
+latest_release_version() {
+  if [[ -n "${RUNNERCTL_LATEST_VERSION:-}" ]]; then
+    normalize_version "$RUNNERCTL_LATEST_VERSION"
+    return
+  fi
+
+  command -v curl >/dev/null 2>&1 || {
+    printf 'runnerctl: curl is required to check for updates\n' >&2
+    return 1
+  }
+
+  local response version
+  response="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/$RUNNERCTL_REPO/releases/latest")" || {
+      printf 'runnerctl: failed to query the latest GitHub Release\n' >&2
+      return 1
+    }
+  version="$(printf '%s\n' "$response" | sed -n 's/.*"tag_name":[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$version" ]] || {
+    printf 'runnerctl: latest GitHub Release did not contain tag_name\n' >&2
+    return 1
+  }
+  normalize_version "$version"
+}
+
+detect_install_method() {
+  if [[ -n "${RUNNERCTL_INSTALL_METHOD:-}" ]]; then
+    printf '%s' "$RUNNERCTL_INSTALL_METHOD"
+    return
+  fi
+
+  if [[ "${RUNNERCTL_CORE:-}" == *"/Cellar/runnerctl/"* ]]; then
+    printf 'homebrew'
+    return
+  fi
+
+  if command -v brew >/dev/null 2>&1 && brew list --versions runnerctl >/dev/null 2>&1; then
+    printf 'homebrew'
+    return
+  fi
+
+  case "$SCRIPT_DIR" in
+    *"/.pnpm/"*|*"/pnpm/global/"*) printf 'pnpm'; return ;;
+    *"/node_modules/@ademkao/runnerctl"|*"/node_modules/@ademkao/runnerctl/"*) printf 'npm'; return ;;
+  esac
+
+  if [[ "$(basename "$SCRIPT_DIR")" == "bin" && -f "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-core" ]]; then
+    printf 'shell'
+    return
+  fi
+
+  printf 'unknown'
+}
+
+infer_install_prefix() {
+  if [[ -n "${RUNNERCTL_INSTALL_PREFIX:-}" ]]; then
+    printf '%s' "$RUNNERCTL_INSTALL_PREFIX"
+    return
+  fi
+  if [[ "$(basename "$SCRIPT_DIR")" == "bin" ]]; then
+    (cd "$SCRIPT_DIR/.." && pwd)
+    return
+  fi
+  printf '%s' "$HOME/.local"
+}
+
+upgrade_command_for() {
+  local method="$1"
+  case "$method" in
+    homebrew)
+      if command -v brew >/dev/null 2>&1 && brew list --versions runnerctl 2>/dev/null | grep -q 'HEAD-'; then
+        printf 'brew update && brew upgrade --fetch-HEAD runnerctl'
+      else
+        printf 'brew update && brew upgrade runnerctl'
+      fi
+      ;;
+    pnpm) printf 'pnpm add -g github:%s#vLATEST' "$RUNNERCTL_REPO" ;;
+    npm) printf 'npm install -g github:%s#vLATEST' "$RUNNERCTL_REPO" ;;
+    shell) printf 'install latest GitHub Release with install.sh and SHA-256 verification' ;;
+    *) printf 'reinstall runnerctl using a supported installer' ;;
+  esac
+}
+
+upgrade_status() {
+  local json="${1:-0}" latest method available=false command
+  latest="$(latest_release_version)"
+  method="$(detect_install_method)"
+  if version_is_newer "$latest" "$VERSION"; then available=true; fi
+  command="$(upgrade_command_for "$method")"
+  command="${command//LATEST/$latest}"
+
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"current_version":'; json_quote "$VERSION"
+    printf ',"latest_version":'; json_quote "$latest"
+    printf ',"update_available":%s' "$available"
+    printf ',"install_method":'; json_quote "$method"
+    printf ',"update_command":'; json_quote "$command"
+    printf '}\n'
+  else
+    printf 'Current version: %s\n' "$VERSION"
+    printf 'Latest version:  %s\n' "$latest"
+    printf 'Installation:    %s\n' "$method"
+    if [[ "$available" == true ]]; then
+      printf 'Update available: yes\n'
+      printf 'Update command:   %s\n' "$command"
+    else
+      printf 'Update available: no\n'
+    fi
+  fi
+}
+
+perform_upgrade() {
+  local latest method prefix installer
+  latest="$(latest_release_version)"
+  method="$(detect_install_method)"
+
+  if ! version_is_newer "$latest" "$VERSION"; then
+    printf 'runnerctl %s is already up to date.\n' "$VERSION"
+    return 0
+  fi
+
+  printf 'Upgrading runnerctl %s -> %s using %s\n' "$VERSION" "$latest" "$method"
+
+  case "$method" in
+    homebrew)
+      command -v brew >/dev/null 2>&1 || usage_error "Homebrew installation detected but brew is unavailable"
+      brew update
+      if brew list --versions runnerctl 2>/dev/null | grep -q 'HEAD-'; then
+        brew upgrade --fetch-HEAD runnerctl
+      else
+        brew upgrade runnerctl
+      fi
+      ;;
+    pnpm)
+      command -v pnpm >/dev/null 2>&1 || usage_error "pnpm installation detected but pnpm is unavailable"
+      pnpm add -g "github:$RUNNERCTL_REPO#v$latest"
+      ;;
+    npm)
+      command -v npm >/dev/null 2>&1 || usage_error "npm installation detected but npm is unavailable"
+      npm install -g "github:$RUNNERCTL_REPO#v$latest"
+      ;;
+    shell)
+      command -v curl >/dev/null 2>&1 || usage_error "curl is required for shell self-update"
+      prefix="$(infer_install_prefix)"
+      installer="$(mktemp)"
+      curl -fsSL "https://raw.githubusercontent.com/$RUNNERCTL_REPO/main/install.sh" -o "$installer"
+      RUNNERCTL_VERSION="$latest" PREFIX="$prefix" bash "$installer"
+      rm -f "$installer"
+      ;;
+    *)
+      printf 'runnerctl: could not determine how this installation is managed.\n' >&2
+      printf 'Reinstall with Homebrew, npm/pnpm, or the shell installer, then retry.\n' >&2
+      return 1
+      ;;
+  esac
+
+  printf 'Upgrade command completed. Run `runnerctl version` to verify the installed version.\n'
+}
+
+cmd_upgrade() {
+  local check=0 json=0 arg
+  shift || true
+  for arg in "$@"; do
+    case "$arg" in
+      --check) check=1 ;;
+      --json) json=1 ;;
+      --help|-h) command_help upgrade; return ;;
+      *) usage_error "unknown upgrade option: $arg" ;;
+    esac
+  done
+  [[ "$json" -eq 0 || "$check" -eq 1 ]] || usage_error "--json requires --check"
+  if [[ "$check" -eq 1 ]]; then
+    upgrade_status "$json"
+  else
+    perform_upgrade
+  fi
+}
+
 completion_bash() {
   cat <<'EOF'
 _runnerctl_complete() {
-  local cur prev commands auth_commands
+  local cur commands auth_commands
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
-  prev="${COMP_WORDS[COMP_CWORD-1]}"
-  commands="add list status logs job-logs start stop restart start-all stop-all remove auth doctor agent completion help version"
+  commands="add list status logs job-logs start stop restart start-all stop-all remove auth doctor upgrade self-update agent completion help version"
   auth_commands="list status use login setup-git doctor map unmap mappings resolve"
   if [[ ${COMP_CWORD} -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -611,8 +854,8 @@ _runnerctl() {
     'logs:Show runner logs' 'job-logs:Show worker logs' 'start:Start runner'
     'stop:Stop runner' 'restart:Restart runner' 'start-all:Start all runners'
     'stop-all:Stop all runners' 'remove:Remove runner' 'auth:Manage GitHub accounts'
-    'doctor:Check environment' 'agent:AI agent contract' 'completion:Shell completion'
-    'help:Command help' 'version:Print version'
+    'doctor:Check environment' 'upgrade:Upgrade runnerctl' 'self-update:Upgrade runnerctl'
+    'agent:AI agent contract' 'completion:Shell completion' 'help:Command help' 'version:Print version'
   )
   auth_commands=('list' 'status' 'use' 'login' 'setup-git' 'doctor' 'map' 'unmap' 'mappings' 'resolve')
   if (( CURRENT == 2 )); then
@@ -630,7 +873,7 @@ EOF
 completion_fish() {
   cat <<'EOF'
 complete -c runnerctl -f
-complete -c runnerctl -n '__fish_use_subcommand' -a 'add list status logs job-logs start stop restart start-all stop-all remove auth doctor agent completion help version'
+complete -c runnerctl -n '__fish_use_subcommand' -a 'add list status logs job-logs start stop restart start-all stop-all remove auth doctor upgrade self-update agent completion help version'
 complete -c runnerctl -n '__fish_seen_subcommand_from auth' -a 'list status use login setup-git doctor map unmap mappings resolve'
 complete -c runnerctl -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 EOF
@@ -655,7 +898,7 @@ help_topic_from_args() {
 }
 
 main() {
-  local cmd="${1:-help}" core topic sub arg json=0
+  local cmd="${1:-help}" core topic sub
   case "$cmd" in
     --help|-h) root_help; return ;;
     --version|-v|version) printf '%s\n' "$VERSION"; return ;;
@@ -678,6 +921,10 @@ main() {
     completion)
       shift || true
       cmd_completion "$@"
+      return
+      ;;
+    upgrade|self-update)
+      cmd_upgrade "$@"
       return
       ;;
   esac
