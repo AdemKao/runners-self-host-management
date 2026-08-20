@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.2"
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 RUNNERS_DIR="$RUNNERCTL_HOME/runners"
 CACHE_DIR="$RUNNERCTL_HOME/cache"
@@ -88,13 +88,41 @@ require_runner() {
   printf '%s' "$dir"
 }
 
+launchd_service_label() {
+  local service="$1"
+  service="${service##*/}"
+  service="${service%.plist}"
+  printf '%s' "$service"
+}
+
+launchd_service_running() {
+  local service="$1" label domain output
+  label="$(launchd_service_label "$service")"
+  [[ -n "$label" ]] || return 1
+  domain="gui/$(id -u)"
+
+  if output="$(launchctl print "$domain/$label" 2>/dev/null)"; then
+    if printf '%s
+' "$output" | grep -Eq '^[[:space:]]*state = running([[:space:]]|$)'; then
+      return 0
+    fi
+    if printf '%s
+' "$output" | grep -Eq '^[[:space:]]*pid = [1-9][0-9]*([[:space:]]|$)'; then
+      return 0
+    fi
+    return 1
+  fi
+
+  launchctl list 2>/dev/null | awk -v label="$label"     '$3 == label && $1 ~ /^[0-9]+$/ { found=1 } END { exit(found ? 0 : 1) }'
+}
+
 service_state() {
   local dir="$1" service=""
   service="$(cat "$dir/.service" 2>/dev/null || true)"
   [[ -n "$service" ]] || { echo "not-installed"; return; }
   case "$(uname -s)" in
     Darwin)
-      if launchctl list 2>/dev/null | grep -Fq "$service"; then echo "running"; else echo "stopped"; fi
+      if launchd_service_running "$service"; then echo "running"; else echo "stopped"; fi
       ;;
     Linux)
       if systemctl is-active --quiet "$service" 2>/dev/null; then echo "running"; else echo "stopped"; fi

@@ -8,7 +8,9 @@ on:
       - 'v*'
     paths:
       - 'runnerctl'
+      - 'runnerctl-base'
       - 'bin/runnerctl'
+      - 'bin/runnerctl-cleanup'
       - 'package.json'
       - 'npm/**'
       - 'scripts/package-release.sh'
@@ -90,8 +92,12 @@ jobs:
           gh release create "$tag" \
             dist/runnerctl \
             dist/runnerctl.sha256 \
+            dist/runnerctl-base \
+            dist/runnerctl-base.sha256 \
             dist/runnerctl-core \
             dist/runnerctl-core.sha256 \
+            dist/runnerctl-cleanup \
+            dist/runnerctl-cleanup.sha256 \
             dist/runnerctl-*.tar.gz \
             dist/runnerctl-*.tar.gz.sha256 \
             --title "runnerctl $tag" \

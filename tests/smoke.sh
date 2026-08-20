@@ -6,8 +6,9 @@ bash -n "$ROOT/runnerctl"
 bash -n "$ROOT/bin/runnerctl"
 bash -n "$ROOT/install.sh"
 bash -n "$ROOT/scripts/package-release.sh"
+bash -n "$ROOT/tests/launchd-status.sh"
 
-[[ "$(bash "$ROOT/runnerctl" version)" == "0.3.1" ]]
+[[ "$(bash "$ROOT/runnerctl" version)" == "0.3.2" ]]
 bash "$ROOT/runnerctl" --help | grep -q 'Runner Management:'
 bash "$ROOT/runnerctl" --help | grep -q 'upgrade'
 bash "$ROOT/runnerctl" --help | grep -q 'AI AGENT:'
@@ -19,18 +20,19 @@ bash "$ROOT/runnerctl" agent | grep -q 'upgrade --check'
 bash "$ROOT/runnerctl" completion bash | grep -q 'upgrade self-update'
 bash "$ROOT/runnerctl" completion zsh | grep -q 'upgrade:Upgrade runnerctl'
 bash "$ROOT/runnerctl" completion fish | grep -q 'upgrade self-update'
+bash "$ROOT/tests/launchd-status.sh"
 
 grep -Fq '(bin/"runnerctl").write_env_script' "$ROOT/Formula/runnerctl.rb"
 ! grep -Fq 'bin.write_env_script(' "$ROOT/Formula/runnerctl.rb"
 
 node -e 'const fs=require("fs"); JSON.parse(fs.readFileSync(0,"utf8"))' < <(bash "$ROOT/runnerctl" agent --json)
-node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.agent_ready || x.version!=="0.3.1" || !x.commands["upgrade --check"]) process.exit(1)' < <(bash "$ROOT/runnerctl" agent --json)
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.agent_ready || x.version!=="0.3.2" || !x.commands["upgrade --check"]) process.exit(1)' < <(bash "$ROOT/runnerctl" agent --json)
 
-node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.current_version!=="0.3.1" || x.latest_version!=="0.3.2" || !x.update_available || x.install_method!=="shell") process.exit(1)' \
-  < <(RUNNERCTL_LATEST_VERSION=0.3.2 RUNNERCTL_INSTALL_METHOD=shell bash "$ROOT/runnerctl" upgrade --check --json)
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.current_version!=="0.3.2" || x.latest_version!=="0.3.3" || !x.update_available || x.install_method!=="shell") process.exit(1)' \
+  < <(RUNNERCTL_LATEST_VERSION=0.3.3 RUNNERCTL_INSTALL_METHOD=shell bash "$ROOT/runnerctl" upgrade --check --json)
 
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.update_available) process.exit(1)' \
-  < <(RUNNERCTL_LATEST_VERSION=0.3.1 RUNNERCTL_INSTALL_METHOD=shell bash "$ROOT/runnerctl" upgrade --check --json)
+  < <(RUNNERCTL_LATEST_VERSION=0.3.2 RUNNERCTL_INSTALL_METHOD=shell bash "$ROOT/runnerctl" upgrade --check --json)
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -102,7 +104,7 @@ run auth map example-org/example-repo personal-account >/dev/null
 run auth unmap example-org/example-repo >/dev/null
 [[ "$(run auth resolve example-org/example-repo)" == "work-account" ]]
 
-node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.version!=="0.3.1" || !x.dependencies.gh) process.exit(1)' < <(run doctor --json)
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.version!=="0.3.2" || !x.dependencies.gh) process.exit(1)' < <(run doctor --json)
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.runners.length!==1 || x.runners[0].name!=="example-runner-01") process.exit(1)' < <(run list --json)
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.name!=="example-runner-01" || x.status!=="not-installed") process.exit(1)' < <(run status example-runner-01 --json)
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.accounts.length!==2) process.exit(1)' < <(run auth list --json)
@@ -110,7 +112,7 @@ node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); 
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.account!=="work-account") process.exit(1)' < <(run auth resolve example-org/example-repo --json)
 node -e 'const fs=require("fs"); JSON.parse(fs.readFileSync(0,"utf8"))' < <(run auth doctor --json)
 
-RUNNERCTL_TEST_BREW_LOG="$tmp/brew.log" PATH="$tmp/bin:$PATH" RUNNERCTL_LATEST_VERSION=0.3.2 RUNNERCTL_INSTALL_METHOD=homebrew \
+RUNNERCTL_TEST_BREW_LOG="$tmp/brew.log" PATH="$tmp/bin:$PATH" RUNNERCTL_LATEST_VERSION=0.3.3 RUNNERCTL_INSTALL_METHOD=homebrew \
   bash "$ROOT/runnerctl" upgrade >/dev/null
 grep -q '^update$' "$tmp/brew.log"
 grep -q '^upgrade-head$' "$tmp/brew.log"
@@ -118,7 +120,7 @@ grep -q '^upgrade-head$' "$tmp/brew.log"
 PREFIX="$tmp/local" bash "$ROOT/install.sh" >/dev/null
 [[ -x "$tmp/local/bin/runnerctl" ]]
 [[ -x "$tmp/local/libexec/runnerctl/runnerctl-core" ]]
-[[ "$($tmp/local/bin/runnerctl version)" == "0.3.1" ]]
+[[ "$($tmp/local/bin/runnerctl version)" == "0.3.2" ]]
 $tmp/local/bin/runnerctl agent --json | grep -q '"agent_ready": true'
 
 DIST_DIR="$tmp/dist" bash "$ROOT/scripts/package-release.sh" >/dev/null
@@ -126,12 +128,12 @@ DIST_DIR="$tmp/dist" bash "$ROOT/scripts/package-release.sh" >/dev/null
 [[ -x "$tmp/dist/runnerctl-core" ]]
 [[ -f "$tmp/dist/runnerctl.sha256" ]]
 [[ -f "$tmp/dist/runnerctl-core.sha256" ]]
-[[ -f "$tmp/dist/runnerctl-0.3.1.tar.gz" ]]
+[[ -f "$tmp/dist/runnerctl-0.3.2.tar.gz" ]]
 
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$tmp/dist" && sha256sum -c runnerctl.sha256 runnerctl-core.sha256 runnerctl-0.3.1.tar.gz.sha256 >/dev/null)
+  (cd "$tmp/dist" && sha256sum -c runnerctl.sha256 runnerctl-core.sha256 runnerctl-0.3.2.tar.gz.sha256 >/dev/null)
 elif command -v shasum >/dev/null 2>&1; then
-  (cd "$tmp/dist" && shasum -a 256 -c runnerctl.sha256 runnerctl-core.sha256 runnerctl-0.3.1.tar.gz.sha256 >/dev/null)
+  (cd "$tmp/dist" && shasum -a 256 -c runnerctl.sha256 runnerctl-core.sha256 runnerctl-0.3.2.tar.gz.sha256 >/dev/null)
 fi
 
 grep -q 'example-org/example-repo' "$ROOT/README.md"
