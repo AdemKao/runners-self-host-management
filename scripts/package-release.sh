@@ -12,21 +12,19 @@ install -m 0755 "$ROOT/bin/runnerctl" "$DIST_DIR/runnerctl"
 tar -czf "$DIST_DIR/runnerctl-${VERSION}.tar.gz" -C "$DIST_DIR" runnerctl
 
 checksum() {
-  local file="$1"
+  local file="$1" hash
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$file" | awk '{print $1 "  " FILENAME}' FILENAME="$(basename "$file")"
+    hash="$(sha256sum "$file" | awk '{print $1}')"
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$file" | awk '{print $1 "  " FILENAME}' FILENAME="$(basename "$file")"
+    hash="$(shasum -a 256 "$file" | awk '{print $1}')"
   else
     echo "sha256sum or shasum is required" >&2
     exit 1
   fi
+  printf '%s  %s\n' "$hash" "$(basename "$file")"
 }
 
-(
-  cd "$DIST_DIR"
-  checksum "$DIST_DIR/runnerctl" > runnerctl.sha256
-  checksum "$DIST_DIR/runnerctl-${VERSION}.tar.gz" > "runnerctl-${VERSION}.tar.gz.sha256"
-)
+checksum "$DIST_DIR/runnerctl" > "$DIST_DIR/runnerctl.sha256"
+checksum "$DIST_DIR/runnerctl-${VERSION}.tar.gz" > "$DIST_DIR/runnerctl-${VERSION}.tar.gz.sha256"
 
 printf 'Created release artifacts in %s\n' "$DIST_DIR"
