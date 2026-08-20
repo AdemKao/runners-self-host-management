@@ -7,9 +7,14 @@ on:
     tags:
       - 'v*'
     paths:
+      - 'runnerctl'
       - 'bin/runnerctl'
       - 'package.json'
+      - 'npm/**'
       - 'scripts/package-release.sh'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'skills/**'
       - '.github/workflows/release.yml'
   workflow_dispatch:
 
@@ -37,9 +42,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cli_version="$(bash bin/runnerctl version)"
+          cli_version="$(bash runnerctl version)"
           package_version="$(node -p "require('./package.json').version")"
-
           test "$cli_version" = "$package_version"
 
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
@@ -86,6 +90,8 @@ jobs:
           gh release create "$tag" \
             dist/runnerctl \
             dist/runnerctl.sha256 \
+            dist/runnerctl-core \
+            dist/runnerctl-core.sha256 \
             dist/runnerctl-*.tar.gz \
             dist/runnerctl-*.tar.gz.sha256 \
             --title "runnerctl $tag" \
