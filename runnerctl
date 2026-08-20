@@ -105,7 +105,7 @@ exec_base() {
 }
 
 safe_print() {
-  printf '%s\n' "$1" || true
+  printf '%s\n' "$1" 2>/dev/null || true
 }
 
 print_base_with_suffix() {
@@ -118,7 +118,7 @@ print_base_with_suffix() {
     agent) suffix_output="$(append_agent_cleanup_help)" ;;
     *) suffix_output="" ;;
   esac
-  printf '%s\n%s\n' "$output" "$suffix_output" || true
+  printf '%s\n%s\n' "$output" "$suffix_output" 2>/dev/null || true
 }
 
 agent_json_with_cleanup() {
@@ -252,6 +252,11 @@ main() {
       fi
       ;;
     *)
+      if [[ "${2:-}" == "--help" || "${2:-}" == "-h" ]]; then
+        output="$(run_base "$@")" || return $?
+        safe_print "$output"
+        return
+      fi
       exec_base "$@"
       ;;
   esac
