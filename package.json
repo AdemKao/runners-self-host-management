@@ -5,10 +5,11 @@
   "license": "MIT",
   "private": false,
   "bin": {
-    "runnerctl": "bin/runnerctl"
+    "runnerctl": "npm/runnerctl.js"
   },
   "files": [
     "bin/runnerctl",
+    "npm/runnerctl.js",
     "README.md",
     "README.zh-TW.md",
     "LICENSE"
