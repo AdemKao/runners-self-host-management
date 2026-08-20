@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.3.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+find_core() {
+  local candidates=(
+    "${RUNNERCTL_CORE:-}"
+    "$SCRIPT_DIR/bin/runnerctl"
+    "$SCRIPT_DIR/../libexec/runnerctl-core"
+    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-core"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -f "$candidate" ]] || continue
+    printf '%s' "$candidate"
+    return 0
+  done
+  printf 'runnerctl: core executable not found. Reinstall runnerctl.\n' >&2
+  exit 1
+}
+
+agent_help() {
+  cat <<'EOF'
+AI AGENT
+========
+runnerctl is safe to automate when the agent distinguishes discovery from mutation.
+
+Start here:
+  1. runnerctl doctor
+  2. runnerctl auth list
+  3. runnerctl auth mappings
+  4. runnerctl list
+  5. runnerctl auth resolve OWNER/REPO
+
+Read-only / discovery commands:
+  runnerctl doctor
+  runnerctl auth list
+  runnerctl auth status
+  runnerctl auth doctor
+  runnerctl auth mappings
+  runnerctl auth resolve OWNER/REPO
+  runnerctl list
+  runnerctl status [RUNNER]
+  runnerctl logs RUNNER --no-follow
+  runnerctl job-logs RUNNER --no-follow
+  runnerctl version
+
+Mutating commands:
+  runnerctl auth use ACCOUNT
+  runnerctl auth login [...]
+  runnerctl auth setup-git
+  runnerctl auth map OWNER/REPO|OWNER/* ACCOUNT
+  runnerctl auth unmap OWNER/REPO|OWNER/*
+  runnerctl add OWNER/REPO [...]
+  runnerctl start|stop|restart RUNNER
+  runnerctl start-all|stop-all
+
+Destructive command:
+  runnerctl remove RUNNER --yes [--account ACCOUNT]
+
+Agent rules:
+  - Prefer read-only discovery before any mutation.
+  - Never invent repository names, account names, runner names, or labels.
+  - For multi-account setups, prefer --account or an existing mapping over changing the global active account.
+  - Do not run `auth use` unless changing the global gh account is explicitly intended.
+  - Do not run `remove --yes` unless the user explicitly asked to remove that runner.
+  - Use --no-follow for logs so automation does not block indefinitely.
+  - Never print, persist, or commit GitHub registration/removal tokens.
+  - Treat self-hosted runner workflows as code execution on the host; do not attach untrusted repositories without explicit user intent.
+  - On Linux, service operations may invoke sudo. Do not attempt to bypass an interactive privilege prompt.
+  - Check the command exit code. A non-zero exit means the requested operation did not complete successfully.
+
+Machine-readable contract:
+  runnerctl agent --json
+
+Generic example:
+  runnerctl auth map 'example-org/*' work-account
+  runnerctl add example-org/example-repo --count 2 --labels local,ci --account work-account
+EOF
+}
+
+agent_json() {
+  cat <<EOF
+{
+  "schema_version": 1,
+  "cli": "runnerctl",
+  "version": "$VERSION",
+  "purpose": "Manage GitHub Actions self-hosted runners on macOS and Linux",
+  "preflight": [
+    "runnerctl doctor",
+    "runnerctl auth list",
+    "runnerctl auth mappings",
+    "runnerctl list"
+  ],
+  "read_only": [
+    "doctor",
+    "auth list",
+    "auth status",
+    "auth doctor",
+    "auth mappings",
+    "auth resolve OWNER/REPO",
+    "list",
+    "status [RUNNER]",
+    "logs RUNNER --no-follow",
+    "job-logs RUNNER --no-follow",
+    "version",
+    "agent --json"
+  ],
+  "mutating": [
+    "auth use ACCOUNT",
+    "auth login",
+    "auth setup-git",
+    "auth map OWNER/REPO|OWNER/* ACCOUNT",
+    "auth unmap OWNER/REPO|OWNER/*",
+    "add OWNER/REPO",
+    "start RUNNER",
+    "stop RUNNER",
+    "restart RUNNER",
+    "start-all",
+    "stop-all"
+  ],
+  "destructive": [
+    "remove RUNNER --yes"
+  ],
+  "rules": [
+    "Perform read-only discovery before mutation",
+    "Never invent repository, account, runner, or label identifiers",
+    "Prefer --account or repository mappings over changing the global active account",
+    "Use --no-follow when reading logs in automation",
+    "Require explicit user intent before remove --yes",
+    "Never print, persist, or commit GitHub registration/removal tokens",
+    "Do not bypass sudo or interactive privilege prompts",
+    "Treat non-zero exit codes as failure"
+  ]
+}
+EOF
+}
+
+show_help() {
+  local core
+  core="$(find_core)"
+  bash "$core" --help
+  cat <<'EOF'
+
+AI AGENT:
+  runnerctl agent          Show automation safety and command guidance
+  runnerctl agent --json   Print the machine-readable agent contract
+  runnerctl help agent     Alias for runnerctl agent
+
+  AI agents should run discovery commands before mutations and use
+  `runnerctl agent --json` when structured guidance is preferred.
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  case "$cmd" in
+    agent|ai-agent)
+      shift || true
+      case "${1:-}" in
+        --json) agent_json ;;
+        "") agent_help ;;
+        *) printf 'runnerctl: unknown agent option: %s\n' "$1" >&2; exit 2 ;;
+      esac
+      ;;
+    help)
+      shift || true
+      if [[ "${1:-}" == "agent" || "${1:-}" == "ai-agent" ]]; then
+        agent_help
+      else
+        show_help
+      fi
+      ;;
+    --help|-h)
+      show_help
+      ;;
+    version|--version|-v)
+      printf '%s\n' "$VERSION"
+      ;;
+    doctor)
+      core="$(find_core)"
+      bash "$core" doctor | sed -E "s/^version: .*/version: $VERSION/"
+      ;;
+    *)
+      core="$(find_core)"
+      exec bash "$core" "$@"
+      ;;
+  esac
+}
+
+main "$@"
