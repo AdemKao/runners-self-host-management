@@ -3,13 +3,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${DIST_DIR:-$ROOT/dist}"
-VERSION="$(bash "$ROOT/bin/runnerctl" version)"
+VERSION="$(bash "$ROOT/runnerctl" version)"
 
 rm -rf "$DIST_DIR"
-mkdir -p "$DIST_DIR"
-install -m 0755 "$ROOT/bin/runnerctl" "$DIST_DIR/runnerctl"
+mkdir -p "$DIST_DIR/libexec"
+install -m 0755 "$ROOT/runnerctl" "$DIST_DIR/runnerctl"
+install -m 0755 "$ROOT/bin/runnerctl" "$DIST_DIR/runnerctl-core"
+install -m 0755 "$ROOT/bin/runnerctl" "$DIST_DIR/libexec/runnerctl-core"
 
-tar -czf "$DIST_DIR/runnerctl-${VERSION}.tar.gz" -C "$DIST_DIR" runnerctl
+tar -czf "$DIST_DIR/runnerctl-${VERSION}.tar.gz" -C "$DIST_DIR" runnerctl libexec/runnerctl-core
 
 checksum() {
   local file="$1" hash
@@ -25,6 +27,7 @@ checksum() {
 }
 
 checksum "$DIST_DIR/runnerctl" > "$DIST_DIR/runnerctl.sha256"
+checksum "$DIST_DIR/runnerctl-core" > "$DIST_DIR/runnerctl-core.sha256"
 checksum "$DIST_DIR/runnerctl-${VERSION}.tar.gz" > "$DIST_DIR/runnerctl-${VERSION}.tar.gz.sha256"
 
 printf 'Created release artifacts in %s\n' "$DIST_DIR"

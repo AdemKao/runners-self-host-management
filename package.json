@@ -1,15 +1,19 @@
 {
   "name": "@ademkao/runnerctl",
-  "version": "0.2.0",
-  "description": "Manage multiple GitHub Actions self-hosted runners on macOS and Linux.",
+  "version": "0.3.0",
+  "description": "Manage GitHub Actions self-hosted runners on macOS and Linux with agent-friendly automation.",
   "license": "MIT",
   "private": false,
   "bin": {
     "runnerctl": "npm/runnerctl.js"
   },
   "files": [
+    "runnerctl",
     "bin/runnerctl",
     "npm/runnerctl.js",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "skills/runnerctl/SKILL.md",
     "README.md",
     "README.zh-TW.md",
     "LICENSE"
@@ -32,7 +36,9 @@
     "ci",
     "devops",
     "runner",
-    "cli"
+    "cli",
+    "ai-agent",
+    "automation"
   ],
   "os": [
     "darwin",

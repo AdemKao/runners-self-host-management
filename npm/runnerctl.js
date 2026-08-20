@@ -3,8 +3,8 @@
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
-const script = path.join(__dirname, '..', 'bin', 'runnerctl');
-const result = spawnSync('bash', [script, ...process.argv.slice(2)], {
+const frontend = path.join(__dirname, '..', 'runnerctl');
+const result = spawnSync('bash', [frontend, ...process.argv.slice(2)], {
   stdio: 'inherit',
 });
 
