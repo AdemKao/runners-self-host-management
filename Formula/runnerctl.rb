@@ -7,10 +7,11 @@ class Runnerctl < Formula
   depends_on "gh"
 
   def install
-    bin.install "runnerctl"
-    chmod 0755, bin/"runnerctl"
+    libexec.install "runnerctl" => "runnerctl-frontend"
     libexec.install "bin/runnerctl" => "runnerctl-core"
+    chmod 0755, libexec/"runnerctl-frontend"
     chmod 0755, libexec/"runnerctl-core"
+    bin.write_env_script libexec/"runnerctl-frontend", RUNNERCTL_CORE: libexec/"runnerctl-core"
   end
 
   test do
