@@ -8,37 +8,48 @@ BIN_DIR="$PREFIX/bin"
 LIBEXEC_DIR="$PREFIX/libexec/runnerctl"
 SCRIPT_DIR=""
 LOCAL_FRONTEND=""
+LOCAL_BASE=""
 LOCAL_CORE=""
+LOCAL_CLEANUP=""
 
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   LOCAL_FRONTEND="$SCRIPT_DIR/runnerctl"
+  LOCAL_BASE="$SCRIPT_DIR/runnerctl-base"
   LOCAL_CORE="$SCRIPT_DIR/bin/runnerctl"
+  LOCAL_CLEANUP="$SCRIPT_DIR/bin/runnerctl-cleanup"
 fi
 
 info() { printf '[runnerctl-install] %s\n' "$*"; }
 die() { printf '[runnerctl-install] ERROR: %s\n' "$*" >&2; exit 1; }
 
 install_files() {
+  local frontend="$1" base="$2" core="$3" cleanup="$4"
+  mkdir -p "$BIN_DIR" "$LIBEXEC_DIR"
+  install -m 0755 "$frontend" "$BIN_DIR/runnerctl"
+  install -m 0755 "$base" "$LIBEXEC_DIR/runnerctl-base"
+  install -m 0755 "$core" "$LIBEXEC_DIR/runnerctl-core"
+  install -m 0755 "$cleanup" "$LIBEXEC_DIR/runnerctl-cleanup"
+  info "Installed runnerctl to $BIN_DIR/runnerctl"
+}
+
+install_legacy_pair() {
   local frontend="$1" core="$2"
   mkdir -p "$BIN_DIR" "$LIBEXEC_DIR"
   install -m 0755 "$frontend" "$BIN_DIR/runnerctl"
   install -m 0755 "$core" "$LIBEXEC_DIR/runnerctl-core"
-  info "Installed runnerctl to $BIN_DIR/runnerctl"
-  info "Installed runnerctl core to $LIBEXEC_DIR/runnerctl-core"
 }
 
 install_legacy_binary() {
   local source="$1"
   mkdir -p "$BIN_DIR"
   install -m 0755 "$source" "$BIN_DIR/runnerctl"
-  info "Installed legacy runnerctl to $BIN_DIR/runnerctl"
 }
 
 install_from_checkout() {
-  [[ -n "$LOCAL_FRONTEND" && -f "$LOCAL_FRONTEND" && -f "$LOCAL_CORE" ]] || return 1
+  [[ -f "$LOCAL_FRONTEND" && -f "$LOCAL_BASE" && -f "$LOCAL_CORE" && -f "$LOCAL_CLEANUP" ]] || return 1
   info "Installing from local checkout"
-  install_files "$LOCAL_FRONTEND" "$LOCAL_CORE"
+  install_files "$LOCAL_FRONTEND" "$LOCAL_BASE" "$LOCAL_CORE" "$LOCAL_CLEANUP"
 }
 
 verify_sha256() {
@@ -52,6 +63,13 @@ verify_sha256() {
   fi
 }
 
+download_verified() {
+  local base="$1" name="$2" tmp="$3"
+  curl -fsSL "$base/$name" -o "$tmp/$name"
+  curl -fsSL "$base/$name.sha256" -o "$tmp/$name.sha256"
+  verify_sha256 "$tmp" "$name.sha256"
+}
+
 install_from_release() {
   local version="$1" base tmp
   tmp="$(mktemp -d)"
@@ -59,14 +77,23 @@ install_from_release() {
   base="https://github.com/$REPO/releases/download/v$version"
 
   info "Downloading runnerctl v$version"
-  curl -fsSL "$base/runnerctl" -o "$tmp/runnerctl"
-  curl -fsSL "$base/runnerctl.sha256" -o "$tmp/runnerctl.sha256"
-  verify_sha256 "$tmp" runnerctl.sha256
+  download_verified "$base" runnerctl "$tmp"
 
   if curl -fsSL "$base/runnerctl-core" -o "$tmp/runnerctl-core" 2>/dev/null; then
     curl -fsSL "$base/runnerctl-core.sha256" -o "$tmp/runnerctl-core.sha256"
     verify_sha256 "$tmp" runnerctl-core.sha256
-    install_files "$tmp/runnerctl" "$tmp/runnerctl-core"
+
+    if curl -fsSL "$base/runnerctl-base" -o "$tmp/runnerctl-base" 2>/dev/null && \
+       curl -fsSL "$base/runnerctl-cleanup" -o "$tmp/runnerctl-cleanup" 2>/dev/null; then
+      curl -fsSL "$base/runnerctl-base.sha256" -o "$tmp/runnerctl-base.sha256"
+      curl -fsSL "$base/runnerctl-cleanup.sha256" -o "$tmp/runnerctl-cleanup.sha256"
+      verify_sha256 "$tmp" runnerctl-base.sha256
+      verify_sha256 "$tmp" runnerctl-cleanup.sha256
+      install_files "$tmp/runnerctl" "$tmp/runnerctl-base" "$tmp/runnerctl-core" "$tmp/runnerctl-cleanup"
+    else
+      info "Release v$version uses the pre-cleanup frontend/core layout"
+      install_legacy_pair "$tmp/runnerctl" "$tmp/runnerctl-core"
+    fi
   else
     info "Release v$version uses the legacy single-file layout"
     install_legacy_binary "$tmp/runnerctl"
@@ -74,15 +101,15 @@ install_from_release() {
 }
 
 install_from_ref() {
-  local tmp frontend_url core_url
+  local tmp
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  frontend_url="https://raw.githubusercontent.com/$REPO/$REF/runnerctl"
-  core_url="https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl"
   info "Installing from $REPO@$REF"
-  curl -fsSL "$frontend_url" -o "$tmp/runnerctl"
-  curl -fsSL "$core_url" -o "$tmp/runnerctl-core"
-  install_files "$tmp/runnerctl" "$tmp/runnerctl-core"
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/runnerctl" -o "$tmp/runnerctl"
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/runnerctl-base" -o "$tmp/runnerctl-base"
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl" -o "$tmp/runnerctl-core"
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-cleanup" -o "$tmp/runnerctl-cleanup"
+  install_files "$tmp/runnerctl" "$tmp/runnerctl-base" "$tmp/runnerctl-core" "$tmp/runnerctl-cleanup"
 }
 
 main() {
@@ -100,12 +127,10 @@ main() {
 
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
-    *)
-      printf '\nAdd this to your shell profile:\n  export PATH="%s:$PATH"\n' "$BIN_DIR"
-      ;;
+    *) printf '\nAdd this to your shell profile:\n  export PATH="%s:$PATH"\n' "$BIN_DIR" ;;
   esac
 
-  printf '\nNext:\n  runnerctl doctor\n  runnerctl agent\n'
+  printf '\nNext:\n  runnerctl doctor\n  runnerctl cleanup status\n'
 }
 
 main "$@"
