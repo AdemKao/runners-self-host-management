@@ -9,7 +9,9 @@
   },
   "files": [
     "runnerctl",
+    "runnerctl-base",
     "bin/runnerctl",
+    "bin/runnerctl-cleanup",
     "npm/runnerctl.js",
     "AGENTS.md",
     "CLAUDE.md",
