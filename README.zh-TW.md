@@ -54,7 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-managemen
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AdemKao/runners-self-host-management/main/install.sh \
-  | RUNNERCTL_VERSION=0.2.0 bash
+  | RUNNERCTL_VERSION=<version> bash
 ```
 
 ### npm / pnpm
