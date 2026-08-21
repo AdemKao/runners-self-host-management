@@ -190,7 +190,7 @@ fetch_action_metadata() {
 }
 
 action_uses_docker() {
-  grep -Eiq '^[[:space:]]*using:[[:space:]]*["'"']?docker(["'"']?[[:space:]]*)$' "$1"
+  grep -Eiq "^[[:space:]]*using:[[:space:]]*['\"]?docker(['\"]?[[:space:]]*)$" "$1"
 }
 
 scan_workflow() {
