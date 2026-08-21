@@ -9,15 +9,22 @@ on:
     paths:
       - 'runnerctl'
       - 'runnerctl-base'
+      - 'runnerctl-base-legacy'
       - 'bin/runnerctl'
+      - 'bin/runnerctl-legacy'
       - 'bin/runnerctl-cleanup'
       - 'bin/runnerctl-host'
       - 'bin/runnerctl-ci'
       - 'bin/runnerctl-hooks'
       - 'bin/runnerctl-queue'
+      - 'bin/runnerctl-queue-legacy'
+      - 'bin/runnerctl-scheduler'
+      - 'bin/runnerctl-scheduler-core'
       - 'package.json'
       - 'npm/**'
       - 'scripts/package-release.sh'
+      - 'docs/releases/**'
+      - 'CHANGELOG.md'
       - 'AGENTS.md'
       - 'CLAUDE.md'
       - 'skills/**'
@@ -72,7 +79,10 @@ jobs:
 
       - name: Run tests
         if: steps.version.outputs.github_release_exists != 'true' || steps.version.outputs.npm_package_exists != 'true'
-        run: bash tests/smoke.sh
+        run: |
+          bash tests/smoke.sh
+          bash tests/installer.sh
+          bash tests/scheduler.sh
 
       - name: Publish npm package
         id: npm_publish
@@ -122,17 +132,25 @@ jobs:
           tag="${{ steps.version.outputs.tag }}"
           target_args=()
           if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then target_args+=(--target "$GITHUB_SHA"); fi
+          notes_args=(--generate-notes)
+          notes_file="docs/releases/${tag}.md"
+          if [[ -f "$notes_file" ]]; then notes_args=(--notes-file "$notes_file"); fi
           gh release create "$tag" \
             dist/runnerctl dist/runnerctl.sha256 \
             dist/runnerctl-base dist/runnerctl-base.sha256 \
+            dist/runnerctl-base-legacy dist/runnerctl-base-legacy.sha256 \
             dist/runnerctl-core dist/runnerctl-core.sha256 \
+            dist/runnerctl-core-legacy dist/runnerctl-core-legacy.sha256 \
             dist/runnerctl-cleanup dist/runnerctl-cleanup.sha256 \
             dist/runnerctl-host dist/runnerctl-host.sha256 \
             dist/runnerctl-ci dist/runnerctl-ci.sha256 \
             dist/runnerctl-hooks dist/runnerctl-hooks.sha256 \
             dist/runnerctl-queue dist/runnerctl-queue.sha256 \
+            dist/runnerctl-queue-legacy dist/runnerctl-queue-legacy.sha256 \
+            dist/runnerctl-scheduler dist/runnerctl-scheduler.sha256 \
+            dist/runnerctl-scheduler-core dist/runnerctl-scheduler-core.sha256 \
             dist/runnerctl-*.tar.gz dist/runnerctl-*.tar.gz.sha256 \
-            --title "runnerctl $tag" --generate-notes "${target_args[@]}"
+            --title "runnerctl $tag" "${notes_args[@]}" "${target_args[@]}"
 
       - name: Nothing to publish
         if: steps.version.outputs.github_release_exists == 'true' && steps.version.outputs.npm_package_exists == 'true'
