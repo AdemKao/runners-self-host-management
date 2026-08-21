@@ -321,6 +321,14 @@ doctor_active_account() {
     --jq ".hosts[\"$GITHUB_HOST\"][] | select(.active == true) | .login" 2>/dev/null | head -n 1 || true
 }
 
+doctor_add_missing_dependency() {
+  local name="$1" present="$2"
+  if [[ "$present" != true ]]; then
+    DOCTOR_STATUS="fail"
+    DOCTOR_MESSAGES+=("Required command missing: $name.")
+  fi
+}
+
 doctor_collect() {
   DOCTOR_OS="$(uname -s)"
   DOCTOR_ARCH="$(uname -m)"
@@ -367,14 +375,10 @@ doctor_collect() {
     DOCTOR_MESSAGES+=("Runner OS compatibility is unknown: ${DOCTOR_PRETTY:-$DOCTOR_OS}. ${DOCTOR_COMPAT_REASON}.")
   fi
 
-  local dep
-  for dep in gh curl tar git; do
-    local flag_var="DOCTOR_${dep^^}"
-    if [[ "${!flag_var}" != true ]]; then
-      DOCTOR_STATUS="fail"
-      DOCTOR_MESSAGES+=("Required command missing: $dep.")
-    fi
-  done
+  doctor_add_missing_dependency gh "$DOCTOR_GH"
+  doctor_add_missing_dependency curl "$DOCTOR_CURL"
+  doctor_add_missing_dependency tar "$DOCTOR_TAR"
+  doctor_add_missing_dependency git "$DOCTOR_GIT"
 
   if (( DOCTOR_MEM_KB > 0 && DOCTOR_MEM_KB < 1048576 )); then
     [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
@@ -414,6 +418,16 @@ doctor_print_messages_json() {
   printf ']'
 }
 
+doctor_print_dependency() {
+  local name="$1" present="$2" path
+  if [[ "$present" == true ]]; then
+    path="$(command -v "$name")"
+    printf '%-8s OK (%s)\n' "$name" "$path"
+  else
+    printf '%-8s MISSING\n' "$name"
+  fi
+}
+
 cmd_doctor_json() {
   doctor_collect
   printf '{"version":'
@@ -451,16 +465,10 @@ cmd_doctor_text() {
   if [[ -n "$DOCTOR_PRETTY" ]]; then printf 'os: %s\n' "$DOCTOR_PRETTY"; fi
   printf 'os compatibility: %s (%s)\n' "$(printf '%s' "$DOCTOR_COMPAT" | tr '[:lower:]' '[:upper:]')" "$DOCTOR_COMPAT_REASON"
 
-  local name flag path
-  for name in gh curl tar git; do
-    flag="DOCTOR_${name^^}"
-    if [[ "${!flag}" == true ]]; then
-      path="$(command -v "$name")"
-      printf '%-8s OK (%s)\n' "$name" "$path"
-    else
-      printf '%-8s MISSING\n' "$name"
-    fi
-  done
+  doctor_print_dependency gh "$DOCTOR_GH"
+  doctor_print_dependency curl "$DOCTOR_CURL"
+  doctor_print_dependency tar "$DOCTOR_TAR"
+  doctor_print_dependency git "$DOCTOR_GIT"
   if [[ "$DOCTOR_DOCKER" == true ]]; then
     if [[ "$DOCTOR_DOCKER_DAEMON" == true ]]; then
       printf '%-8s OK (%s; daemon reachable)\n' docker "$(command -v docker)"
