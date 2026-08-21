@@ -23,8 +23,11 @@ bash -n "$ROOT/tests/queue.sh"
 [[ "$(bash "$ROOT/runnerctl" version)" == "$VERSION" ]]
 [[ "$(bash "$ROOT/bin/runnerctl" version)" == "$VERSION" ]]
 bash "$ROOT/runnerctl" --help | grep -q 'Runner Management:'
+bash "$ROOT/runnerctl" --help | grep -q 'host'
+bash "$ROOT/runnerctl" --help | grep -q 'ci'
 bash "$ROOT/runnerctl" --help | grep -q 'capacity'
 bash "$ROOT/runnerctl" --help | grep -q 'queue'
+bash "$ROOT/runnerctl" --help | grep -q 'upgrade'
 bash "$ROOT/runnerctl" --help | grep -q 'AI AGENT:'
 bash "$ROOT/runnerctl" add --help | grep -q 'Side effects:'
 bash "$ROOT/runnerctl" host --help | grep -q 'host prerequisites'
@@ -34,8 +37,11 @@ bash "$ROOT/runnerctl" queue --help | grep -q 'host-wide execution gate'
 bash "$ROOT/runnerctl" upgrade --help | grep -q 'runnerctl upgrade --check --json'
 bash "$ROOT/runnerctl" self-update --help | grep -q 'Check for or install the latest runnerctl release.'
 bash "$ROOT/runnerctl" help auth map | grep -q 'Map a repository'
+bash "$ROOT/runnerctl" agent | grep -q 'host inspect'
+bash "$ROOT/runnerctl" agent | grep -q 'ci check'
 bash "$ROOT/runnerctl" agent | grep -q 'capacity'
 bash "$ROOT/runnerctl" agent | grep -q 'queue status'
+bash "$ROOT/runnerctl" agent | grep -q 'upgrade --check'
 bash "$ROOT/runnerctl" completion bash | grep -q 'capacity queue upgrade'
 bash "$ROOT/runnerctl" completion zsh | grep -q 'queue:Manage host-wide job concurrency'
 bash "$ROOT/runnerctl" completion fish | grep -q 'capacity queue upgrade'
@@ -45,10 +51,11 @@ grep -Fq '(bin/"runnerctl").write_env_script' "$ROOT/Formula/runnerctl.rb"
 ! grep -Fq 'bin.write_env_script(' "$ROOT/Formula/runnerctl.rb"
 
 node -e 'const fs=require("fs"); JSON.parse(fs.readFileSync(0,"utf8"))' < <(bash "$ROOT/runnerctl" agent --json)
-node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.agent_ready || x.version!==process.argv[1] || !x.commands["capacity"] || !x.commands["queue status"] || !x.commands["queue enable"] || !x.commands["ci check"]) process.exit(1)' "$VERSION" < <(bash "$ROOT/runnerctl" agent --json)
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.agent_ready || x.version!==process.argv[1] || !x.commands["host inspect"] || !x.commands["host bootstrap --dry-run"] || !x.commands["ci check"] || !x.commands["capacity"] || !x.commands["queue status"] || !x.commands["queue enable"] || !x.commands["upgrade --check"]) process.exit(1)' "$VERSION" < <(bash "$ROOT/runnerctl" agent --json)
 
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.current_version!==process.argv[1] || x.latest_version!==process.argv[2] || !x.update_available || x.install_method!=="shell") process.exit(1)' "$VERSION" "$NEXT_VERSION" \
   < <(RUNNERCTL_LATEST_VERSION="$NEXT_VERSION" RUNNERCTL_INSTALL_METHOD=shell bash "$ROOT/runnerctl" upgrade --check --json)
+
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.update_available) process.exit(1)' \
   < <(RUNNERCTL_LATEST_VERSION="$VERSION" RUNNERCTL_INSTALL_METHOD=shell bash "$ROOT/runnerctl" upgrade --check --json)
 
@@ -59,19 +66,35 @@ mkdir -p "$tmp/bin" "$tmp/data/runners/example-runner-01"
 cat > "$tmp/bin/gh" <<'EOF_GH'
 #!/usr/bin/env bash
 set -euo pipefail
+
 if [[ "${1:-} ${2:-}" == "auth token" ]]; then
-  user=""; while [[ $# -gt 0 ]]; do if [[ "$1" == "--user" ]]; then user="${2:-}"; break; fi; shift; done
-  [[ "$user" == "personal-account" || "$user" == "work-account" ]] || exit 1; printf 'fake-token\n'; exit 0
-fi
-if [[ "${1:-} ${2:-}" == "auth status" ]]; then
-  args=" $* "
-  if [[ "$args" == *'map({login:'* ]]; then printf '[{"login":"personal-account","active":true,"state":"loggedIn"},{"login":"work-account","active":false,"state":"loggedIn"}]\n'
-  elif [[ "$args" == *' --active '* ]]; then printf 'personal-account\n'; else printf '* personal-account loggedIn\n  work-account loggedIn\n'; fi
+  user=""
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--user" ]]; then user="${2:-}"; break; fi
+    shift
+  done
+  [[ "$user" == "personal-account" || "$user" == "work-account" ]] || exit 1
+  printf 'fake-token\n'
   exit 0
 fi
+
+if [[ "${1:-} ${2:-}" == "auth status" ]]; then
+  args=" $* "
+  if [[ "$args" == *'map({login:'* ]]; then
+    printf '[{"login":"personal-account","active":true,"state":"loggedIn"},{"login":"work-account","active":false,"state":"loggedIn"}]\n'
+  elif [[ "$args" == *' --active '* ]]; then
+    printf 'personal-account\n'
+  else
+    printf '* personal-account loggedIn\n  work-account loggedIn\n'
+  fi
+  exit 0
+fi
+
 if [[ "${1:-} ${2:-}" == "auth switch" ]]; then exit 0; fi
 if [[ "${1:-} ${2:-}" == "config get" ]]; then printf 'https\n'; exit 0; fi
-printf 'unsupported fake gh command: %s\n' "$*" >&2; exit 1
+
+printf 'unsupported fake gh command: %s\n' "$*" >&2
+exit 1
 EOF_GH
 chmod +x "$tmp/bin/gh"
 
@@ -94,30 +117,64 @@ account=work-account
 created_at=2026-01-01T00:00:00Z
 EOF_META
 
-run() { env PATH="$tmp/bin:$PATH" RUNNERCTL_HOME="$tmp/data" RUNNERCTL_CONFIG_HOME="$tmp/config" bash "$ROOT/runnerctl" "$@"; }
+run() {
+  env PATH="$tmp/bin:$PATH" RUNNERCTL_HOME="$tmp/data" RUNNERCTL_CONFIG_HOME="$tmp/config" \
+    bash "$ROOT/runnerctl" "$@"
+}
+
 run auth map 'example-org/*' work-account >/dev/null
 [[ "$(run auth resolve example-org/example-repo)" == "work-account" ]]
 run auth map example-org/example-repo personal-account >/dev/null
 [[ "$(run auth resolve example-org/example-repo)" == "personal-account" ]]
 run auth unmap example-org/example-repo >/dev/null
 [[ "$(run auth resolve example-org/example-repo)" == "work-account" ]]
+
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.version!==process.argv[1] || !x.dependencies.gh) process.exit(1)' "$VERSION" < <(run doctor --json)
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.runners.length!==1 || x.runners[0].name!=="example-runner-01") process.exit(1)' < <(run list --json)
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.name!=="example-runner-01" || x.status!=="not-installed") process.exit(1)' < <(run status example-runner-01 --json)
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.accounts.length!==2) process.exit(1)' < <(run auth list --json)
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.mappings[0].pattern!=="example-org/*") process.exit(1)' < <(run auth mappings --json)
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.account!=="work-account") process.exit(1)' < <(run auth resolve example-org/example-repo --json)
+node -e 'const fs=require("fs"); JSON.parse(fs.readFileSync(0,"utf8"))' < <(run auth doctor --json)
 
-RUNNERCTL_TEST_BREW_LOG="$tmp/brew.log" PATH="$tmp/bin:$PATH" RUNNERCTL_LATEST_VERSION="$NEXT_VERSION" RUNNERCTL_INSTALL_METHOD=homebrew bash "$ROOT/runnerctl" upgrade >/dev/null
-grep -q '^update$' "$tmp/brew.log"; grep -q '^upgrade-head$' "$tmp/brew.log"
+RUNNERCTL_TEST_BREW_LOG="$tmp/brew.log" PATH="$tmp/bin:$PATH" RUNNERCTL_LATEST_VERSION="$NEXT_VERSION" RUNNERCTL_INSTALL_METHOD=homebrew \
+  bash "$ROOT/runnerctl" upgrade >/dev/null
+grep -q '^update$' "$tmp/brew.log"
+grep -q '^upgrade-head$' "$tmp/brew.log"
 
 PREFIX="$tmp/local" bash "$ROOT/install.sh" >/dev/null
 [[ -x "$tmp/local/bin/runnerctl" ]]
-for helper in runnerctl-core runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue; do [[ -x "$tmp/local/libexec/runnerctl/$helper" ]]; done
+[[ -x "$tmp/local/libexec/runnerctl/runnerctl-core" ]]
+[[ -x "$tmp/local/libexec/runnerctl/runnerctl-host" ]]
+[[ -x "$tmp/local/libexec/runnerctl/runnerctl-ci" ]]
+[[ -x "$tmp/local/libexec/runnerctl/runnerctl-hooks" ]]
+[[ -x "$tmp/local/libexec/runnerctl/runnerctl-queue" ]]
 [[ "$($tmp/local/bin/runnerctl version)" == "$VERSION" ]]
+$tmp/local/bin/runnerctl agent --json | grep -q '"agent_ready": true'
+$tmp/local/bin/runnerctl host --help | grep -q 'host prerequisites'
+$tmp/local/bin/runnerctl ci --help | grep -q 'GitHub Actions workflows'
 $tmp/local/bin/runnerctl capacity --help | grep -q 'safe job concurrency'
 $tmp/local/bin/runnerctl queue --help | grep -q 'host-wide execution gate'
 
 DIST_DIR="$tmp/dist" bash "$ROOT/scripts/package-release.sh" >/dev/null
-for artifact in runnerctl runnerctl-core runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue; do [[ -x "$tmp/dist/$artifact" ]]; [[ -f "$tmp/dist/$artifact.sha256" ]]; done
+[[ -x "$tmp/dist/runnerctl" ]]
+[[ -x "$tmp/dist/runnerctl-core" ]]
+[[ -x "$tmp/dist/runnerctl-host" ]]
+[[ -x "$tmp/dist/runnerctl-ci" ]]
+[[ -x "$tmp/dist/runnerctl-hooks" ]]
+[[ -x "$tmp/dist/runnerctl-queue" ]]
+[[ -f "$tmp/dist/runnerctl.sha256" ]]
+[[ -f "$tmp/dist/runnerctl-core.sha256" ]]
+[[ -f "$tmp/dist/runnerctl-host.sha256" ]]
+[[ -f "$tmp/dist/runnerctl-ci.sha256" ]]
+[[ -f "$tmp/dist/runnerctl-hooks.sha256" ]]
+[[ -f "$tmp/dist/runnerctl-queue.sha256" ]]
 [[ -f "$tmp/dist/runnerctl-$VERSION.tar.gz" ]]
-for helper in runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue; do tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q "^bin/$helper$"; done
+
+tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q '^bin/runnerctl-host$'
+tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q '^bin/runnerctl-ci$'
+tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q '^bin/runnerctl-hooks$'
+tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q '^bin/runnerctl-queue$'
 
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$tmp/dist" && sha256sum -c runnerctl.sha256 runnerctl-core.sha256 runnerctl-host.sha256 runnerctl-ci.sha256 runnerctl-hooks.sha256 runnerctl-queue.sha256 "runnerctl-$VERSION.tar.gz.sha256" >/dev/null)
@@ -126,5 +183,8 @@ elif command -v shasum >/dev/null 2>&1; then
 fi
 
 grep -q 'example-org/example-repo' "$ROOT/README.md"
+grep -q 'example-org/example-repo' "$ROOT/README.zh-TW.md"
 ! grep -q 'Claire-s-English' "$ROOT/README.md"
+! grep -q 'Claire-s-English' "$ROOT/README.zh-TW.md"
+
 echo "smoke tests passed"
