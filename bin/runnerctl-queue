@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
+RUNNERS_DIR="$RUNNERCTL_HOME/runners"
+HOOKS_DIR="$RUNNERCTL_HOME/hooks"
+QUEUE_DIR="$RUNNERCTL_HOME/queue"
+CONFIG_FILE="$QUEUE_DIR/config"
+SLOTS_DIR="$QUEUE_DIR/slots"
+WAITING_DIR="$QUEUE_DIR/waiting"
+LOCK_DIR="$QUEUE_DIR/.lock"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+POLL_SECONDS="${RUNNERCTL_QUEUE_POLL_SECONDS:-1}"
+STALE_GRACE_SECONDS="${RUNNERCTL_QUEUE_STALE_GRACE_SECONDS:-30}"
+
+info(){ printf '[runnerctl-queue] %s\n' "$*"; }
+warn(){ printf '[runnerctl-queue] WARN: %s\n' "$*" >&2; }
+die(){ printf '[runnerctl-queue] ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage(){
+  cat <<'EOF'
+Protect a shared self-hosted runner host with a global execution gate.
+
+Usage:
+  runnerctl capacity [--json]
+  runnerctl queue status [--json]
+  runnerctl queue enable [--max-concurrency N]
+  runnerctl queue disable
+  runnerctl queue set --max-concurrency N
+  runnerctl queue drain
+  runnerctl queue resume
+
+GitHub remains responsible for job assignment. When queue mode is enabled,
+runnerctl job-start hooks wait for a host-wide slot before workflow steps run.
+All registered runner services remain online, so repositories are not starved.
+EOF
+}
+
+json_quote(){
+  local value="${1:-}"
+  value="${value//\\/\\\\}"; value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"; value="${value//$'\r'/\\r}"; value="${value//$'\t'/\\t}"
+  printf '"%s"' "$value"
+}
+
+find_hooks_helper(){
+  local candidates=(
+    "${RUNNERCTL_HOOKS_HELPER:-}"
+    "$SCRIPT_DIR/runnerctl-hooks"
+    "$SCRIPT_DIR/../libexec/runnerctl-hooks"
+    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-hooks"
+  ) candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -f "$candidate" ]] || continue
+    printf '%s' "$candidate"; return 0
+  done
+  die "runner hook helper not found; reinstall runnerctl"
+}
+
+ensure_dirs(){ mkdir -p "$QUEUE_DIR" "$SLOTS_DIR" "$WAITING_DIR"; }
+config_value(){ awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$CONFIG_FILE" 2>/dev/null || true; }
+queue_enabled(){ [[ "$(config_value enabled)" == true ]]; }
+queue_drained(){ [[ "$(config_value drained)" == true ]]; }
+max_concurrency(){ local n; n="$(config_value max_concurrency)"; [[ "$n" =~ ^[1-9][0-9]*$ ]] && printf '%s' "$n" || printf '1'; }
+
+write_config(){
+  local enabled="$1" max="$2" drained="$3" tmp
+  ensure_dirs; tmp="$(mktemp)"
+  printf 'enabled=%s\nmax_concurrency=%s\ndrained=%s\n' "$enabled" "$max" "$drained" >"$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+}
+
+cpu_count(){
+  local v="${RUNNERCTL_QUEUE_CPU_COUNT:-}"
+  [[ "$v" =~ ^[1-9][0-9]*$ ]] && { printf '%s' "$v"; return; }
+  v="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+  [[ "$v" =~ ^[1-9][0-9]*$ ]] && { printf '%s' "$v"; return; }
+  v="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+  [[ "$v" =~ ^[1-9][0-9]*$ ]] && printf '%s' "$v" || printf '1'
+}
+
+memory_mib(){
+  local override="${RUNNERCTL_QUEUE_MEMORY_MIB:-}" value
+  [[ "$override" =~ ^[0-9]+$ ]] && { printf '%s' "$override"; return; }
+  if [[ -r /proc/meminfo ]]; then
+    awk '/^MemTotal:/ {printf "%d", $2/1024; exit}' /proc/meminfo; return
+  fi
+  value="$(sysctl -n hw.memsize 2>/dev/null || true)"
+  [[ "$value" =~ ^[0-9]+$ ]] && printf '%s' "$((value / 1024 / 1024))" || printf '0'
+}
+
+swap_mib(){
+  local override="${RUNNERCTL_QUEUE_SWAP_MIB:-}" value
+  [[ "$override" =~ ^[0-9]+$ ]] && { printf '%s' "$override"; return; }
+  if [[ -r /proc/meminfo ]]; then
+    awk '/^SwapTotal:/ {printf "%d", $2/1024; exit}' /proc/meminfo; return
+  fi
+  value="$(sysctl -n vm.swapusage 2>/dev/null | sed -nE 's/.*total = ([0-9.]+)([MG]).*/\1 \2/p' || true)"
+  if [[ -n "$value" ]]; then
+    awk '{if($2=="G") printf "%d",$1*1024; else printf "%d",$1}' <<<"$value"
+  else printf '0'; fi
+}
+
+min(){ (( $1 < $2 )) && printf '%s' "$1" || printf '%s' "$2"; }
+configured_runner_count(){
+  mkdir -p "$RUNNERS_DIR"
+  find "$RUNNERS_DIR" -mindepth 2 -maxdepth 2 -name .runnerctl-meta -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
+capacity_values(){
+  CAP_CPU="$(cpu_count)"; CAP_MEMORY="$(memory_mib)"; CAP_SWAP="$(swap_mib)"
+  local mem_light mem_node mem_docker
+  mem_light=$((CAP_MEMORY / 768)); (( mem_light < 1 )) && mem_light=1
+  CAP_LIGHT="$(min "$CAP_CPU" "$mem_light")"
+  if (( CAP_MEMORY < 2048 )); then
+    CAP_NODE=0; CAP_DOCKER=0; CAP_DEFAULT=1
+  else
+    mem_node=$((CAP_MEMORY / 2048)); (( mem_node < 1 )) && mem_node=1
+    CAP_NODE="$(min "$CAP_CPU" "$mem_node")"
+    if (( CAP_MEMORY < 4096 )); then CAP_DOCKER=0
+    else mem_docker=$((CAP_MEMORY / 3072)); (( mem_docker < 1 )) && mem_docker=1; CAP_DOCKER="$(min "$CAP_CPU" "$mem_docker")"; fi
+    CAP_DEFAULT="$CAP_NODE"; (( CAP_DEFAULT < 1 )) && CAP_DEFAULT=1
+  fi
+  CAP_RUNNERS="$(configured_runner_count)"
+}
+
+print_capacity(){
+  local json="$1" warning=false
+  capacity_values
+  (( CAP_RUNNERS > CAP_DEFAULT )) && warning=true
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"cpu":%s,"memory_mib":%s,"swap_mib":%s,"configured_runners":%s' "$CAP_CPU" "$CAP_MEMORY" "$CAP_SWAP" "$CAP_RUNNERS"
+    printf ',"recommended":{"lightweight":%s,"node":%s,"docker":%s,"default_max_concurrency":%s}' "$CAP_LIGHT" "$CAP_NODE" "$CAP_DOCKER" "$CAP_DEFAULT"
+    printf ',"oversubscribed":%s}\n' "$warning"
+  else
+    printf 'Host capacity\n'
+    printf '  CPU:                %s\n' "$CAP_CPU"
+    printf '  Memory:             %s MiB\n' "$CAP_MEMORY"
+    printf '  Swap:               %s MiB\n' "$CAP_SWAP"
+    printf '  Configured runners: %s\n' "$CAP_RUNNERS"
+    printf '\nRecommended concurrency\n'
+    printf '  lightweight:        %s\n' "$CAP_LIGHT"
+    printf '  Node builds:        %s\n' "$CAP_NODE"
+    printf '  Docker-heavy:       %s\n' "$CAP_DOCKER"
+    printf '  default queue max:  %s\n' "$CAP_DEFAULT"
+    [[ "$warning" == false ]] || printf '\nWARNING: configured runners exceed the recommended host concurrency.\n'
+  fi
+}
+
+acquire_lock(){
+  ensure_dirs
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    local pid=""
+    [[ -f "$LOCK_DIR/pid" ]] && pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then rm -rf "$LOCK_DIR" 2>/dev/null || true; continue; fi
+    sleep "$POLL_SECONDS"
+  done
+  printf '%s\n' "$$" >"$LOCK_DIR/pid"
+}
+release_lock(){ rm -rf "$LOCK_DIR" 2>/dev/null || true; }
+
+slot_file(){ printf '%s/%s.slot' "$SLOTS_DIR" "$1"; }
+slot_value(){ awk -F= -v k="$2" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$1" 2>/dev/null || true; }
+
+cleanup_stale_state(){
+  local f pid acquired now age
+  ensure_dirs; now="$(date +%s)"
+  for f in "$SLOTS_DIR"/*.slot; do
+    [[ -f "$f" ]] || continue
+    pid="$(slot_value "$f" worker_pid)"; acquired="$(slot_value "$f" acquired_at)"
+    [[ "$acquired" =~ ^[0-9]+$ ]] || acquired=0; age=$((now - acquired))
+    if [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null && (( age >= STALE_GRACE_SECONDS )); then
+      warn "recovering stale slot: $(basename "$f")"
+      rm -f "$f"
+    fi
+  done
+  for f in "$WAITING_DIR"/*.wait; do
+    [[ -f "$f" ]] || continue
+    pid="$(slot_value "$f" hook_pid)"
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || rm -f "$f"
+  done
+}
+
+active_count(){ find "$SLOTS_DIR" -maxdepth 1 -type f -name '*.slot' 2>/dev/null | wc -l | tr -d ' '; }
+waiting_count(){ find "$WAITING_DIR" -maxdepth 1 -type f -name '*.wait' 2>/dev/null | wc -l | tr -d ' '; }
+
+write_started_hook(){
+  local runner="$1" target="$HOOKS_DIR/$runner/queue-start.sh"
+  mkdir -p "$(dirname "$target")"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -u
+queue_dir="$QUEUE_DIR"
+config="\$queue_dir/config"
+slots="\$queue_dir/slots"
+waiting="\$queue_dir/waiting"
+lock="\$queue_dir/.lock"
+runner="$runner"
+poll="${POLL_SECONDS}"
+stale_grace="${STALE_GRACE_SECONDS}"
+mkdir -p "\$slots" "\$waiting"
+wait_file="\$waiting/\$runner-\$\$.wait"
+printf 'runner=%s\\nhook_pid=%s\\nwaiting_at=%s\\n' "\$runner" "\$\$" "\$(date +%s)" >"\$wait_file"
+trap 'rm -f "\$wait_file"' EXIT INT TERM
+value(){ awk -F= -v k="\$1" '\$1==k{sub(/^[^=]*=/,"");print;exit}' "\$config" 2>/dev/null || true; }
+slot_value(){ awk -F= -v k="\$2" '\$1==k{sub(/^[^=]*=/,"");print;exit}' "\$1" 2>/dev/null || true; }
+lock_acquire(){
+  while ! mkdir "\$lock" 2>/dev/null; do
+    p=""; [[ -f "\$lock/pid" ]] && p="\$(cat "\$lock/pid" 2>/dev/null || true)"
+    if [[ "\$p" =~ ^[0-9]+$ ]] && ! kill -0 "\$p" 2>/dev/null; then rm -rf "\$lock" 2>/dev/null || true; continue; fi
+    sleep "\$poll"
+  done
+  printf '%s\\n' "\$\$" >"\$lock/pid"
+}
+lock_release(){ rm -rf "\$lock" 2>/dev/null || true; }
+cleanup_stale(){
+  now="\$(date +%s)"
+  for f in "\$slots"/*.slot; do
+    [[ -f "\$f" ]] || continue
+    p="\$(slot_value "\$f" worker_pid)"; acquired="\$(slot_value "\$f" acquired_at)"; [[ "\$acquired" =~ ^[0-9]+$ ]] || acquired=0
+    age=\$((now-acquired))
+    if [[ "\$p" =~ ^[0-9]+$ ]] && ! kill -0 "\$p" 2>/dev/null && (( age >= stale_grace )); then rm -f "\$f"; fi
+  done
+}
+while :; do
+  enabled="\$(value enabled)"; [[ "\$enabled" == true ]] || exit 0
+  if [[ "\$(value drained)" == true ]]; then sleep "\$poll"; continue; fi
+  lock_acquire
+  cleanup_stale
+  enabled="\$(value enabled)"; drained="\$(value drained)"; max="\$(value max_concurrency)"
+  [[ "\$max" =~ ^[1-9][0-9]*$ ]] || max=1
+  count="\$(find "\$slots" -maxdepth 1 -type f -name '*.slot' 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "\$enabled" != true ]]; then lock_release; exit 0; fi
+  if [[ "\$drained" != true ]] && (( count < max )); then
+    printf 'runner=%s\\nworker_pid=%s\\nhook_pid=%s\\nacquired_at=%s\\n' "\$runner" "\$PPID" "\$\$" "\$(date +%s)" >"\$slots/\$runner.slot"
+    lock_release
+    printf '[runnerctl-queue] acquired host slot for %s (%s/%s)\\n' "\$runner" "\$((count+1))" "\$max"
+    exit 0
+  fi
+  lock_release
+  sleep "\$poll"
+done
+EOF
+  chmod 0755 "$target"
+  printf '%s' "$target"
+}
+
+write_completed_hook(){
+  local runner="$1" target="$HOOKS_DIR/$runner/queue-completed.sh"
+  mkdir -p "$(dirname "$target")"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -u
+queue_dir="$QUEUE_DIR"; slots="\$queue_dir/slots"; waiting="\$queue_dir/waiting"; lock="\$queue_dir/.lock"; runner="$runner"; poll="${POLL_SECONDS}"
+mkdir -p "\$slots" "\$waiting"
+while ! mkdir "\$lock" 2>/dev/null; do
+  p=""; [[ -f "\$lock/pid" ]] && p="\$(cat "\$lock/pid" 2>/dev/null || true)"
+  if [[ "\$p" =~ ^[0-9]+$ ]] && ! kill -0 "\$p" 2>/dev/null; then rm -rf "\$lock" 2>/dev/null || true; continue; fi
+  sleep "\$poll"
+done
+printf '%s\\n' "\$\$" >"\$lock/pid"
+rm -f "\$slots/\$runner.slot" "\$waiting/\$runner-"*.wait 2>/dev/null || true
+rm -rf "\$lock" 2>/dev/null || true
+printf '[runnerctl-queue] released host slot for %s\\n' "\$runner"
+exit 0
+EOF
+  chmod 0755 "$target"
+  printf '%s' "$target"
+}
+
+restart_runner(){
+  local d="$1"
+  [[ "${RUNNERCTL_SKIP_SERVICE_RESTART:-0}" == 1 ]] && return 0
+  [[ -x "$d/svc.sh" && -f "$d/.service" ]] || { warn "runner $(basename "$d") needs a manual restart"; return 0; }
+  if [[ "$(uname -s)" == Linux ]]; then
+    (cd "$d" && sudo ./svc.sh stop >/dev/null 2>&1 || true); (cd "$d" && sudo ./svc.sh start >/dev/null)
+  else
+    (cd "$d" && ./svc.sh stop >/dev/null 2>&1 || true); (cd "$d" && ./svc.sh start >/dev/null)
+  fi
+}
+
+attach_runner(){
+  local runner="$1" d="$RUNNERS_DIR/$runner" hooks started completed
+  [[ -f "$d/.runnerctl-meta" ]] || die "Unknown runner: $runner"
+  hooks="$(find_hooks_helper)"; started="$(write_started_hook "$runner")"; completed="$(write_completed_hook "$runner")"
+  RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" register "$runner" started queue "$started" >/dev/null
+  RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" register "$runner" completed queue "$completed" >/dev/null
+  restart_runner "$d"
+}
+
+attach_all(){
+  local d
+  mkdir -p "$RUNNERS_DIR"; shopt -s nullglob
+  for d in "$RUNNERS_DIR"/*; do [[ -f "$d/.runnerctl-meta" ]] && attach_runner "$(basename "$d")"; done
+}
+
+detach_runner(){
+  local runner="$1" d="$RUNNERS_DIR/$runner" hooks
+  [[ -f "$d/.runnerctl-meta" ]] || return 0
+  hooks="$(find_hooks_helper)"
+  RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" unregister "$runner" started queue >/dev/null || true
+  RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" unregister "$runner" completed queue >/dev/null || true
+  rm -f "$HOOKS_DIR/$runner/queue-start.sh" "$HOOKS_DIR/$runner/queue-completed.sh"
+  restart_runner "$d"
+}
+
+detach_all(){
+  local d
+  mkdir -p "$RUNNERS_DIR"; shopt -s nullglob
+  for d in "$RUNNERS_DIR"/*; do [[ -f "$d/.runnerctl-meta" ]] && detach_runner "$(basename "$d")"; done
+}
+
+cmd_enable(){
+  local max="" arg
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --max-concurrency) max="${2:-}"; shift 2 ;; *) die "Unknown queue enable option: $1" ;; esac
+  done
+  if [[ -z "$max" ]]; then capacity_values; max="$CAP_DEFAULT"; fi
+  [[ "$max" =~ ^[1-9][0-9]*$ ]] || die "--max-concurrency must be a positive integer"
+  write_config true "$max" false
+  attach_all
+  info "global queue enabled (max_concurrency=$max)"
+}
+
+cmd_disable(){
+  local max; max="$(max_concurrency)"
+  write_config false "$max" false
+  detach_all
+  rm -f "$SLOTS_DIR"/*.slot "$WAITING_DIR"/*.wait 2>/dev/null || true
+  info "global queue disabled"
+}
+
+cmd_set(){
+  [[ "${1:-}" == --max-concurrency && -n "${2:-}" && $# -eq 2 ]] || die "queue set requires --max-concurrency N"
+  [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "--max-concurrency must be a positive integer"
+  local enabled=false drained=false
+  queue_enabled && enabled=true; queue_drained && drained=true
+  write_config "$enabled" "$2" "$drained"
+  info "max_concurrency set to $2; active jobs are not terminated"
+}
+
+cmd_drain(){
+  queue_enabled || die "queue is not enabled"
+  write_config true "$(max_concurrency)" true
+  info "queue draining; active jobs continue and new jobs wait for resume"
+}
+cmd_resume(){
+  queue_enabled || die "queue is not enabled"
+  write_config true "$(max_concurrency)" false
+  info "queue resumed"
+}
+
+print_status(){
+  local json="$1" enabled=false drained=false max active waiting configured
+  ensure_dirs; acquire_lock; cleanup_stale_state; release_lock
+  queue_enabled && enabled=true; queue_drained && drained=true; max="$(max_concurrency)"
+  active="$(active_count)"; waiting="$(waiting_count)"; configured="$(configured_runner_count)"
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"enabled":%s,"drained":%s,"max_concurrency":%s,"active":%s,"waiting":%s,"configured_runners":%s,"slots":[' "$enabled" "$drained" "$max" "$active" "$waiting" "$configured"
+    local first=true f runner pid acquired
+    for f in "$SLOTS_DIR"/*.slot; do
+      [[ -f "$f" ]] || continue
+      [[ "$first" == true ]] || printf ','; first=false
+      runner="$(slot_value "$f" runner)"; pid="$(slot_value "$f" worker_pid)"; acquired="$(slot_value "$f" acquired_at)"
+      printf '{"runner":'; json_quote "$runner"; printf ',"worker_pid":%s,"acquired_at":%s}' "${pid:-0}" "${acquired:-0}"
+    done
+    printf ']}\n'
+  else
+    printf 'Global host queue\n'
+    printf '  enabled:            %s\n' "$enabled"
+    printf '  drained:            %s\n' "$drained"
+    printf '  max concurrency:    %s\n' "$max"
+    printf '  active:             %s\n' "$active"
+    printf '  waiting:            %s\n' "$waiting"
+    printf '  configured runners: %s\n' "$configured"
+  fi
+}
+
+cmd_status(){ local json=0; [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "queue status accepts only --json"; print_status "$json"; }
+
+main(){
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    capacity) local json=0; [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "capacity accepts only --json"; print_capacity "$json" ;;
+    status) cmd_status "$@" ;;
+    enable) cmd_enable "$@" ;;
+    disable) [[ $# -eq 0 ]] || die "queue disable takes no arguments"; cmd_disable ;;
+    set) cmd_set "$@" ;;
+    drain) [[ $# -eq 0 ]] || die "queue drain takes no arguments"; cmd_drain ;;
+    resume) [[ $# -eq 0 ]] || die "queue resume takes no arguments"; cmd_resume ;;
+    attach) [[ $# -eq 1 ]] || die "internal attach requires RUNNER"; queue_enabled && attach_runner "$1" || true ;;
+    _hook-start) [[ $# -eq 1 ]] || die "internal _hook-start requires RUNNER"; exec "$HOOKS_DIR/$1/queue-start.sh" ;;
+    _hook-completed) [[ $# -eq 1 ]] || die "internal _hook-completed requires RUNNER"; exec "$HOOKS_DIR/$1/queue-completed.sh" ;;
+    help|--help|-h|"") usage ;;
+    *) die "Unknown queue command: $cmd" ;;
+  esac
+}
+
+main "$@"
