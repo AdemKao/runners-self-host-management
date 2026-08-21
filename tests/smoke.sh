@@ -1,42 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="0.4.0"
-NEXT_VERSION="0.4.1"
+VERSION="0.4.1"
+NEXT_VERSION="0.4.2"
 
 bash -n "$ROOT/runnerctl"
 bash -n "$ROOT/runnerctl-base"
 bash -n "$ROOT/bin/runnerctl"
 bash -n "$ROOT/bin/runnerctl-cleanup"
 bash -n "$ROOT/bin/runnerctl-host"
+bash -n "$ROOT/bin/runnerctl-ci"
 bash -n "$ROOT/install.sh"
 bash -n "$ROOT/scripts/package-release.sh"
 bash -n "$ROOT/tests/launchd-status.sh"
 bash -n "$ROOT/tests/host.sh"
+bash -n "$ROOT/tests/ci-check.sh"
 
 [[ "$(bash "$ROOT/runnerctl" version)" == "$VERSION" ]]
 [[ "$(bash "$ROOT/bin/runnerctl" version)" == "$VERSION" ]]
 bash "$ROOT/runnerctl" --help | grep -q 'Runner Management:'
 bash "$ROOT/runnerctl" --help | grep -q 'host'
+bash "$ROOT/runnerctl" --help | grep -q 'ci'
 bash "$ROOT/runnerctl" --help | grep -q 'upgrade'
 bash "$ROOT/runnerctl" --help | grep -q 'AI AGENT:'
 bash "$ROOT/runnerctl" add --help | grep -q 'Side effects:'
 bash "$ROOT/runnerctl" host --help | grep -q 'host prerequisites'
+bash "$ROOT/runnerctl" ci --help | grep -q 'workflow compatibility'
 bash "$ROOT/runnerctl" upgrade --help | grep -q 'runnerctl upgrade --check --json'
 bash "$ROOT/runnerctl" self-update --help | grep -q 'Check for or install the latest runnerctl release.'
 bash "$ROOT/runnerctl" help auth map | grep -q 'Map a repository'
 bash "$ROOT/runnerctl" agent | grep -q 'host inspect'
+bash "$ROOT/runnerctl" agent | grep -q 'ci check'
 bash "$ROOT/runnerctl" agent | grep -q 'upgrade --check'
-bash "$ROOT/runnerctl" completion bash | grep -q 'doctor host upgrade'
-bash "$ROOT/runnerctl" completion zsh | grep -q 'host:Inspect or bootstrap host prerequisites'
-bash "$ROOT/runnerctl" completion fish | grep -q 'doctor host upgrade'
+bash "$ROOT/runnerctl" completion bash | grep -q 'doctor host ci upgrade'
+bash "$ROOT/runnerctl" completion zsh | grep -q 'ci:Check workflow compatibility'
+bash "$ROOT/runnerctl" completion fish | grep -q 'doctor host ci upgrade'
 bash "$ROOT/tests/launchd-status.sh"
 
 grep -Fq '(bin/"runnerctl").write_env_script' "$ROOT/Formula/runnerctl.rb"
 ! grep -Fq 'bin.write_env_script(' "$ROOT/Formula/runnerctl.rb"
 
 node -e 'const fs=require("fs"); JSON.parse(fs.readFileSync(0,"utf8"))' < <(bash "$ROOT/runnerctl" agent --json)
-node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.agent_ready || x.version!==process.argv[1] || !x.commands["host inspect"] || !x.commands["host bootstrap --dry-run"] || !x.commands["upgrade --check"]) process.exit(1)' "$VERSION" < <(bash "$ROOT/runnerctl" agent --json)
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.agent_ready || x.version!==process.argv[1] || !x.commands["host inspect"] || !x.commands["host bootstrap --dry-run"] || !x.commands["ci check"] || !x.commands["upgrade --check"]) process.exit(1)' "$VERSION" < <(bash "$ROOT/runnerctl" agent --json)
 
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.current_version!==process.argv[1] || x.latest_version!==process.argv[2] || !x.update_available || x.install_method!=="shell") process.exit(1)' "$VERSION" "$NEXT_VERSION" \
   < <(RUNNERCTL_LATEST_VERSION="$NEXT_VERSION" RUNNERCTL_INSTALL_METHOD=shell bash "$ROOT/runnerctl" upgrade --check --json)
@@ -131,25 +136,30 @@ PREFIX="$tmp/local" bash "$ROOT/install.sh" >/dev/null
 [[ -x "$tmp/local/bin/runnerctl" ]]
 [[ -x "$tmp/local/libexec/runnerctl/runnerctl-core" ]]
 [[ -x "$tmp/local/libexec/runnerctl/runnerctl-host" ]]
+[[ -x "$tmp/local/libexec/runnerctl/runnerctl-ci" ]]
 [[ "$($tmp/local/bin/runnerctl version)" == "$VERSION" ]]
 $tmp/local/bin/runnerctl agent --json | grep -q '"agent_ready": true'
 $tmp/local/bin/runnerctl host --help | grep -q 'host prerequisites'
+$tmp/local/bin/runnerctl ci --help | grep -q 'workflow compatibility'
 
 DIST_DIR="$tmp/dist" bash "$ROOT/scripts/package-release.sh" >/dev/null
 [[ -x "$tmp/dist/runnerctl" ]]
 [[ -x "$tmp/dist/runnerctl-core" ]]
 [[ -x "$tmp/dist/runnerctl-host" ]]
+[[ -x "$tmp/dist/runnerctl-ci" ]]
 [[ -f "$tmp/dist/runnerctl.sha256" ]]
 [[ -f "$tmp/dist/runnerctl-core.sha256" ]]
 [[ -f "$tmp/dist/runnerctl-host.sha256" ]]
+[[ -f "$tmp/dist/runnerctl-ci.sha256" ]]
 [[ -f "$tmp/dist/runnerctl-$VERSION.tar.gz" ]]
 
 tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q '^bin/runnerctl-host$'
+tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q '^bin/runnerctl-ci$'
 
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$tmp/dist" && sha256sum -c runnerctl.sha256 runnerctl-core.sha256 runnerctl-host.sha256 "runnerctl-$VERSION.tar.gz.sha256" >/dev/null)
+  (cd "$tmp/dist" && sha256sum -c runnerctl.sha256 runnerctl-core.sha256 runnerctl-host.sha256 runnerctl-ci.sha256 "runnerctl-$VERSION.tar.gz.sha256" >/dev/null)
 elif command -v shasum >/dev/null 2>&1; then
-  (cd "$tmp/dist" && shasum -a 256 -c runnerctl.sha256 runnerctl-core.sha256 runnerctl-host.sha256 "runnerctl-$VERSION.tar.gz.sha256" >/dev/null)
+  (cd "$tmp/dist" && shasum -a 256 -c runnerctl.sha256 runnerctl-core.sha256 runnerctl-host.sha256 runnerctl-ci.sha256 "runnerctl-$VERSION.tar.gz.sha256" >/dev/null)
 fi
 
 grep -q 'example-org/example-repo' "$ROOT/README.md"
