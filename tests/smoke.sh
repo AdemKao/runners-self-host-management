@@ -11,6 +11,7 @@ bash -n "$ROOT/scripts/package-release.sh"
 bash -n "$ROOT/tests/launchd-status.sh"
 
 [[ "$(bash "$ROOT/runnerctl" version)" == "$VERSION" ]]
+[[ "$(bash "$ROOT/bin/runnerctl" version)" == "$VERSION" ]]
 bash "$ROOT/runnerctl" --help | grep -q 'Runner Management:'
 bash "$ROOT/runnerctl" --help | grep -q 'upgrade'
 bash "$ROOT/runnerctl" --help | grep -q 'AI AGENT:'
