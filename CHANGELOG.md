@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-22
+
 ### Added
 - Host capacity inspection via `runnerctl capacity` with human-readable and JSON output.
 - Opt-in host-wide job admission control via `runnerctl queue`.
@@ -98,7 +100,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The project began with the initial `runnerctl` implementation for managing multiple GitHub Actions self-hosted runners on one host, including runner registration, service lifecycle management, logs, removal, environment diagnostics, installation tooling, CI, and local isolation guidance.
 
-[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.2
 [0.4.1]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.1
 [0.4.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.0
 [0.3.3]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.3.3
