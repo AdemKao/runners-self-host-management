@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GITHUB_CLI_RPM_REPO="https://cli.github.com/packages/rpm/gh-cli.repo"
+REQUIRED_DEPS=(git gh curl tar)
+
+usage() {
+  cat <<'EOF'
+Inspect or bootstrap host prerequisites for GitHub Actions self-hosted runners.
+
+Usage:
+  runnerctl host inspect [--json]
+  runnerctl host bootstrap [--dry-run] [--json]
+
+Commands:
+  inspect      Read-only host and dependency inspection
+  bootstrap    Install missing CLI prerequisites using the detected package manager
+
+Flags:
+  --dry-run    Show the package-manager operations without changing the host
+  --json       Emit machine-readable output
+  -h, --help   Show help
+
+Safety:
+  - bootstrap only manages git, gh, curl, and tar prerequisites.
+  - it does not configure swap, firewall rules, Docker, credentials, or runner registration.
+  - macOS requires Homebrew to already be installed.
+EOF
+}
+
+json_quote() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '"%s"' "$value"
+}
+
+os_value() {
+  local key="$1" file="${RUNNERCTL_HOST_OS_RELEASE_FILE:-/etc/os-release}" line value
+  [[ -r "$file" ]] || return 0
+  line="$(grep -m1 "^${key}=" "$file" 2>/dev/null || true)"
+  [[ -n "$line" ]] || return 0
+  value="${line#*=}"
+  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+    value="${value#\"}"
+    value="${value%\"}"
+  elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+    value="${value#\'}"
+    value="${value%\'}"
+  fi
+  printf '%s' "$value"
+}
+
+forced_missing() {
+  local name="$1" list=",${RUNNERCTL_HOST_FORCE_MISSING:-},"
+  [[ "$list" == *",$name,"* ]]
+}
+
+dep_present() {
+  local name="$1"
+  forced_missing "$name" && return 1
+  command -v "$name" >/dev/null 2>&1
+}
+
+host_collect() {
+  HOST_OS="$(uname -s)"
+  HOST_ARCH="$(uname -m)"
+  HOST_ID="$(os_value ID)"
+  HOST_ID_LIKE="$(os_value ID_LIKE)"
+  HOST_VERSION_ID="$(os_value VERSION_ID)"
+  HOST_PRETTY="$(os_value PRETTY_NAME)"
+  HOST_FAMILY="unknown"
+  HOST_SUPPORTED=false
+  HOST_REASON="unsupported platform"
+  HOST_PACKAGE_MANAGER="none"
+  HOST_PACKAGE_MANAGER_AVAILABLE=false
+  HOST_REQUIRES_PRIVILEGE=false
+
+  local major lower_id like
+  lower_id="$(printf '%s' "$HOST_ID" | tr '[:upper:]' '[:lower:]')"
+  like="$(printf '%s' "$HOST_ID_LIKE" | tr '[:upper:]' '[:lower:]')"
+  major="${HOST_VERSION_ID%%.*}"
+
+  if [[ "$HOST_OS" == "Darwin" ]]; then
+    HOST_FAMILY="macos"
+    HOST_SUPPORTED=true
+    HOST_REASON="macOS host"
+    HOST_PACKAGE_MANAGER="brew"
+    command -v brew >/dev/null 2>&1 && HOST_PACKAGE_MANAGER_AVAILABLE=true
+  elif [[ "$HOST_OS" == "Linux" ]]; then
+    if [[ "$lower_id" =~ ^(rhel|centos|rocky|almalinux|ol|fedora)$ || " $like " == *" rhel "* || " $like " == *" centos "* || " $like " == *" fedora "* ]]; then
+      HOST_FAMILY="rhel"
+      HOST_PACKAGE_MANAGER="dnf"
+      HOST_REQUIRES_PRIVILEGE=true
+      if [[ "$major" =~ ^[0-9]+$ ]] && (( 10#$major < 8 )) && [[ "$lower_id" != "fedora" ]]; then
+        HOST_REASON="RHEL-compatible Linux older than version 8"
+      else
+        HOST_SUPPORTED=true
+        HOST_REASON="RHEL-compatible Linux 8+"
+      fi
+      command -v dnf >/dev/null 2>&1 && HOST_PACKAGE_MANAGER_AVAILABLE=true
+    elif [[ "$lower_id" == "ubuntu" || "$lower_id" == "debian" || " $like " == *" debian "* ]]; then
+      HOST_FAMILY="debian"
+      HOST_PACKAGE_MANAGER="apt-get"
+      HOST_REQUIRES_PRIVILEGE=true
+      if [[ "$lower_id" == "ubuntu" && "$major" =~ ^[0-9]+$ && 10#$major -lt 20 ]]; then
+        HOST_REASON="Ubuntu older than 20.04"
+      elif [[ "$lower_id" == "debian" && "$major" =~ ^[0-9]+$ && 10#$major -lt 10 ]]; then
+        HOST_REASON="Debian older than version 10"
+      else
+        HOST_SUPPORTED=true
+        HOST_REASON="Debian-family Linux"
+      fi
+      command -v apt-get >/dev/null 2>&1 && HOST_PACKAGE_MANAGER_AVAILABLE=true
+    fi
+  fi
+
+  HOST_MISSING=()
+  local dep
+  for dep in "${REQUIRED_DEPS[@]}"; do
+    dep_present "$dep" || HOST_MISSING+=("$dep")
+  done
+}
+
+missing_contains() {
+  local wanted="$1" item
+  for item in "${HOST_MISSING[@]}"; do
+    [[ "$item" == "$wanted" ]] && return 0
+  done
+  return 1
+}
+
+print_string_array() {
+  local first=true value
+  printf '['
+  for value in "$@"; do
+    [[ "$first" == true ]] || printf ','
+    json_quote "$value"
+    first=false
+  done
+  printf ']'
+}
+
+print_inspect_json() {
+  host_collect
+  printf '{"platform":{"os":'; json_quote "$HOST_OS"
+  printf ',"arch":'; json_quote "$HOST_ARCH"
+  printf ',"distro_id":'; json_quote "$HOST_ID"
+  printf ',"distro_version":'; json_quote "$HOST_VERSION_ID"
+  printf ',"pretty_name":'; json_quote "$HOST_PRETTY"
+  printf ',"family":'; json_quote "$HOST_FAMILY"
+  printf ',"supported":%s' "$HOST_SUPPORTED"
+  printf ',"reason":'; json_quote "$HOST_REASON"; printf '}'
+  printf ',"package_manager":{"name":'; json_quote "$HOST_PACKAGE_MANAGER"
+  printf ',"available":%s,"requires_privilege":%s}' "$HOST_PACKAGE_MANAGER_AVAILABLE" "$HOST_REQUIRES_PRIVILEGE"
+  printf ',"dependencies":{'
+  local first=true dep present
+  for dep in "${REQUIRED_DEPS[@]}"; do
+    [[ "$first" == true ]] || printf ','
+    json_quote "$dep"; printf ':'
+    present=false; dep_present "$dep" && present=true
+    printf '%s' "$present"
+    first=false
+  done
+  printf '},"missing":'; print_string_array "${HOST_MISSING[@]}"
+  printf ',"bootstrap_available":%s}\n' "$([[ "$HOST_SUPPORTED" == true && "$HOST_PACKAGE_MANAGER_AVAILABLE" == true ]] && printf true || printf false)"
+}
+
+print_inspect_text() {
+  host_collect
+  printf 'runnerctl host inspect\n'
+  printf 'platform: %s (%s)\n' "$HOST_OS" "$HOST_ARCH"
+  [[ -n "$HOST_PRETTY" ]] && printf 'os: %s\n' "$HOST_PRETTY"
+  printf 'family: %s\n' "$HOST_FAMILY"
+  printf 'support: %s (%s)\n' "$([[ "$HOST_SUPPORTED" == true ]] && printf SUPPORTED || printf UNSUPPORTED)" "$HOST_REASON"
+  printf 'package manager: %s (%s)\n' "$HOST_PACKAGE_MANAGER" "$([[ "$HOST_PACKAGE_MANAGER_AVAILABLE" == true ]] && printf READY || printf MISSING)"
+  local dep
+  for dep in "${REQUIRED_DEPS[@]}"; do
+    if dep_present "$dep"; then
+      printf '%-8s OK (%s)\n' "$dep" "$(command -v "$dep")"
+    else
+      printf '%-8s MISSING\n' "$dep"
+    fi
+  done
+  if [[ ${#HOST_MISSING[@]} -eq 0 ]]; then
+    printf 'bootstrap: not required\n'
+  elif [[ "$HOST_SUPPORTED" == true && "$HOST_PACKAGE_MANAGER_AVAILABLE" == true ]]; then
+    printf 'bootstrap: available (%d missing)\n' "${#HOST_MISSING[@]}"
+  else
+    printf 'bootstrap: unavailable\n'
+  fi
+}
+
+privileged_prefix() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    return 0
+  fi
+  command -v sudo >/dev/null 2>&1 || {
+    printf 'runnerctl: sudo is required to install host packages as a non-root user\n' >&2
+    return 1
+  }
+  printf 'sudo'
+}
+
+plan_lines() {
+  host_collect
+  [[ "$HOST_SUPPORTED" == true ]] || {
+    printf 'runnerctl: unsupported host: %s\n' "$HOST_REASON" >&2
+    return 1
+  }
+  [[ "$HOST_PACKAGE_MANAGER_AVAILABLE" == true ]] || {
+    if [[ "$HOST_OS" == "Darwin" ]]; then
+      printf 'runnerctl: Homebrew is required for host bootstrap on macOS; install Homebrew first\n' >&2
+    else
+      printf 'runnerctl: package manager %s is unavailable\n' "$HOST_PACKAGE_MANAGER" >&2
+    fi
+    return 1
+  }
+
+  if [[ ${#HOST_MISSING[@]} -eq 0 ]]; then
+    printf 'No package changes required.'
+    return 0
+  fi
+
+  local standard=() dep
+  for dep in git curl tar; do
+    missing_contains "$dep" && standard+=("$dep")
+  done
+
+  case "$HOST_FAMILY" in
+    macos)
+      printf 'brew install'
+      for dep in "${HOST_MISSING[@]}"; do printf ' %q' "$dep"; done
+      ;;
+    rhel)
+      if [[ ${#standard[@]} -gt 0 ]]; then
+        printf 'sudo dnf install -y'
+        for dep in "${standard[@]}"; do printf ' %q' "$dep"; done
+        printf '\n'
+      fi
+      if missing_contains gh; then
+        if command -v dnf5 >/dev/null 2>&1; then
+          printf 'sudo dnf install -y dnf5-plugins\n'
+          printf 'sudo dnf config-manager addrepo --from-repofile=%q\n' "$GITHUB_CLI_RPM_REPO"
+        else
+          printf "sudo dnf install -y 'dnf-command(config-manager)'\n"
+          printf 'sudo dnf config-manager --add-repo %q\n' "$GITHUB_CLI_RPM_REPO"
+        fi
+        printf 'sudo dnf install -y gh'
+      fi
+      ;;
+    debian)
+      printf 'sudo apt-get update\n'
+      printf 'sudo apt-get install -y'
+      for dep in "${HOST_MISSING[@]}"; do printf ' %q' "$dep"; done
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+run_privileged() {
+  local prefix
+  prefix="$(privileged_prefix)" || return 1
+  if [[ -n "$prefix" ]]; then
+    sudo "$@"
+  else
+    "$@"
+  fi
+}
+
+apply_bootstrap() {
+  host_collect
+  [[ "$HOST_SUPPORTED" == true ]] || {
+    printf 'runnerctl: unsupported host: %s\n' "$HOST_REASON" >&2
+    return 1
+  }
+  [[ "$HOST_PACKAGE_MANAGER_AVAILABLE" == true ]] || {
+    printf 'runnerctl: package manager %s is unavailable\n' "$HOST_PACKAGE_MANAGER" >&2
+    return 1
+  }
+  [[ ${#HOST_MISSING[@]} -gt 0 ]] || { printf 'Host prerequisites are already installed.\n'; return 0; }
+
+  local standard=() dep
+  for dep in git curl tar; do missing_contains "$dep" && standard+=("$dep"); done
+
+  case "$HOST_FAMILY" in
+    macos)
+      brew install "${HOST_MISSING[@]}"
+      ;;
+    rhel)
+      if [[ ${#standard[@]} -gt 0 ]]; then
+        run_privileged dnf install -y "${standard[@]}"
+      fi
+      if missing_contains gh; then
+        if command -v dnf5 >/dev/null 2>&1; then
+          run_privileged dnf install -y dnf5-plugins
+          run_privileged dnf config-manager addrepo "--from-repofile=$GITHUB_CLI_RPM_REPO"
+        else
+          run_privileged dnf install -y 'dnf-command(config-manager)'
+          run_privileged dnf config-manager --add-repo "$GITHUB_CLI_RPM_REPO"
+        fi
+        run_privileged dnf install -y gh
+      fi
+      ;;
+    debian)
+      run_privileged apt-get update
+      run_privileged apt-get install -y "${HOST_MISSING[@]}"
+      ;;
+  esac
+
+  local failed=0
+  for dep in "${REQUIRED_DEPS[@]}"; do
+    if ! dep_present "$dep"; then
+      printf 'runnerctl: dependency still missing after bootstrap: %s\n' "$dep" >&2
+      failed=1
+    fi
+  done
+  [[ "$failed" -eq 0 ]]
+}
+
+cmd_inspect() {
+  local json=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=1 ;;
+      --help|-h) usage; return ;;
+      *) printf 'runnerctl: unknown host inspect option: %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  if [[ "$json" -eq 1 ]]; then print_inspect_json; else print_inspect_text; fi
+}
+
+cmd_bootstrap() {
+  local dry_run=0 json=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run=1 ;;
+      --json) json=1 ;;
+      --help|-h) usage; return ;;
+      *) printf 'runnerctl: unknown host bootstrap option: %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    if [[ "$json" -eq 1 ]]; then
+      host_collect
+      local plan
+      plan="$(plan_lines)" || return $?
+      printf '{"dry_run":true,"missing":'; print_string_array "${HOST_MISSING[@]}"
+      printf ',"plan":'; json_quote "$plan"; printf '}\n'
+    else
+      printf 'runnerctl host bootstrap --dry-run\n'
+      plan_lines
+      printf '\n'
+    fi
+    return 0
+  fi
+
+  if [[ "$json" -eq 1 ]]; then
+    apply_bootstrap >/dev/null
+    print_inspect_json
+  else
+    printf 'runnerctl host bootstrap\n'
+    printf 'Plan:\n'
+    plan_lines | sed 's/^/  /'
+    printf '\nApplying package changes...\n'
+    apply_bootstrap
+    printf 'Host bootstrap complete.\n'
+    print_inspect_text
+  fi
+}
+
+main() {
+  local command="${1:-inspect}"
+  shift || true
+  case "$command" in
+    inspect) cmd_inspect "$@" ;;
+    bootstrap) cmd_bootstrap "$@" ;;
+    --help|-h|help) usage ;;
+    *) printf 'runnerctl: unknown host command: %s\n' "$command" >&2; usage >&2; return 2 ;;
+  esac
+}
+
+main "$@"

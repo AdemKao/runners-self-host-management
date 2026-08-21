@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.3"
+VERSION="0.4.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 RUNNERS_DIR="$RUNNERCTL_HOME/runners"
@@ -24,6 +24,23 @@ find_core() {
     return 0
   done
   printf 'runnerctl: core executable not found. Reinstall runnerctl.\n' >&2
+  exit 1
+}
+
+find_host_helper() {
+  local candidates=(
+    "${RUNNERCTL_HOST_HELPER:-}"
+    "$SCRIPT_DIR/bin/runnerctl-host"
+    "$SCRIPT_DIR/../libexec/runnerctl-host"
+    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-host"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -f "$candidate" ]] || continue
+    printf '%s' "$candidate"
+    return 0
+  done
+  printf 'runnerctl: host helper not found. Reinstall runnerctl.\n' >&2
   exit 1
 }
 
@@ -140,6 +157,7 @@ Maintenance:
 
 Diagnostics & Automation:
   doctor         Check the local runnerctl environment
+  host           Inspect or bootstrap host prerequisites
   agent          Show the AI-agent automation contract
 
 Other:
@@ -236,6 +254,29 @@ Side effects:
 
 AI AGENT:
   This should normally be the first runnerctl command an agent executes.
+EOF
+      ;;
+    host)
+      cat <<'EOF'
+Inspect or bootstrap host prerequisites for self-hosted runners.
+
+Usage:
+  runnerctl host inspect [--json]
+  runnerctl host bootstrap [--dry-run] [--json]
+
+Commands:
+  inspect      Read-only OS, package-manager, and dependency inspection
+  bootstrap    Install missing git/gh/curl/tar prerequisites
+
+Safety:
+  - `host bootstrap --dry-run` is read-only.
+  - `host bootstrap` mutates system packages and may invoke sudo.
+  - It does not configure swap, firewall, Docker, credentials, or runner registration.
+  - macOS requires Homebrew to already be installed.
+
+AI AGENT:
+  Prefer `runnerctl host inspect --json` and `runnerctl host bootstrap --dry-run --json`
+  before allowing package mutations.
 EOF
       ;;
     auth)
@@ -448,21 +489,23 @@ runnerctl exposes an automation contract for coding agents and CI tooling.
 
 Recommended discovery sequence:
   1. runnerctl doctor --json
-  2. runnerctl auth list --json
-  3. runnerctl auth mappings --json
-  4. runnerctl list --json
-  5. runnerctl upgrade --check --json
-  6. runnerctl auth resolve OWNER/REPO --json
-  7. runnerctl COMMAND --help before a mutation
+  2. runnerctl host inspect --json
+  3. runnerctl auth list --json
+  4. runnerctl auth mappings --json
+  5. runnerctl list --json
+  6. runnerctl upgrade --check --json
+  7. runnerctl auth resolve OWNER/REPO --json
+  8. runnerctl COMMAND --help before a mutation
 
 Read-only / discovery:
-  doctor, list, status
+  doctor, host inspect, host bootstrap --dry-run, list, status
   auth list, auth status, auth doctor, auth mappings, auth resolve
   upgrade --check
   logs --no-follow, job-logs --no-follow
   version, agent, completion
 
 Mutating:
+  host bootstrap
   auth use, auth login, auth setup-git, auth map, auth unmap
   add, start, stop, restart, start-all, stop-all
   upgrade, self-update
@@ -497,6 +540,7 @@ agent_json() {
   "platforms": ["macOS", "Linux"],
   "discovery_sequence": [
     "runnerctl doctor --json",
+    "runnerctl host inspect --json",
     "runnerctl auth list --json",
     "runnerctl auth mappings --json",
     "runnerctl list --json",
@@ -505,6 +549,9 @@ agent_json() {
   ],
   "commands": {
     "doctor": {"effect": "read-only", "json": true},
+    "host inspect": {"effect": "read-only", "json": true},
+    "host bootstrap --dry-run": {"effect": "read-only", "json": true},
+    "host bootstrap": {"effect": "mutating-system-packages", "json": true},
     "list": {"effect": "read-only", "json": true},
     "status": {"effect": "read-only", "json": true},
     "auth list": {"effect": "read-only", "json": true},
@@ -853,15 +900,18 @@ cmd_upgrade() {
 completion_bash() {
   cat <<'EOF'
 _runnerctl_complete() {
-  local cur commands auth_commands
+  local cur commands auth_commands host_commands
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
-  commands="add list status logs job-logs start stop restart start-all stop-all remove auth doctor upgrade self-update agent completion help version"
+  commands="add list status logs job-logs start stop restart start-all stop-all remove auth doctor host upgrade self-update agent completion help version"
   auth_commands="list status use login setup-git doctor map unmap mappings resolve"
+  host_commands="inspect bootstrap"
   if [[ ${COMP_CWORD} -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
   elif [[ "${COMP_WORDS[1]}" == "auth" && ${COMP_CWORD} -eq 2 ]]; then
     COMPREPLY=( $(compgen -W "$auth_commands" -- "$cur") )
+  elif [[ "${COMP_WORDS[1]}" == "host" && ${COMP_CWORD} -eq 2 ]]; then
+    COMPREPLY=( $(compgen -W "$host_commands" -- "$cur") )
   elif [[ "${COMP_WORDS[1]}" == "completion" && ${COMP_CWORD} -eq 2 ]]; then
     COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
   fi
@@ -874,20 +924,24 @@ completion_zsh() {
   cat <<'EOF'
 #compdef runnerctl
 _runnerctl() {
-  local -a commands auth_commands
+  local -a commands auth_commands host_commands
   commands=(
     'add:Register self-hosted runners' 'list:List runners' 'status:Show status'
     'logs:Show runner logs' 'job-logs:Show worker logs' 'start:Start runner'
     'stop:Stop runner' 'restart:Restart runner' 'start-all:Start all runners'
     'stop-all:Stop all runners' 'remove:Remove runner' 'auth:Manage GitHub accounts'
-    'doctor:Check environment' 'upgrade:Upgrade runnerctl' 'self-update:Upgrade runnerctl'
+    'doctor:Check environment' 'host:Inspect or bootstrap host prerequisites'
+    'upgrade:Upgrade runnerctl' 'self-update:Upgrade runnerctl'
     'agent:AI agent contract' 'completion:Shell completion' 'help:Command help' 'version:Print version'
   )
   auth_commands=('list' 'status' 'use' 'login' 'setup-git' 'doctor' 'map' 'unmap' 'mappings' 'resolve')
+  host_commands=('inspect' 'bootstrap')
   if (( CURRENT == 2 )); then
     _describe 'command' commands
   elif [[ "$words[2]" == auth && CURRENT == 3 ]]; then
     _values 'auth command' $auth_commands
+  elif [[ "$words[2]" == host && CURRENT == 3 ]]; then
+    _values 'host command' $host_commands
   elif [[ "$words[2]" == completion && CURRENT == 3 ]]; then
     _values 'shell' bash zsh fish
   fi
@@ -899,8 +953,9 @@ EOF
 completion_fish() {
   cat <<'EOF'
 complete -c runnerctl -f
-complete -c runnerctl -n '__fish_use_subcommand' -a 'add list status logs job-logs start stop restart start-all stop-all remove auth doctor upgrade self-update agent completion help version'
+complete -c runnerctl -n '__fish_use_subcommand' -a 'add list status logs job-logs start stop restart start-all stop-all remove auth doctor host upgrade self-update agent completion help version'
 complete -c runnerctl -n '__fish_seen_subcommand_from auth' -a 'list status use login setup-git doctor map unmap mappings resolve'
+complete -c runnerctl -n '__fish_seen_subcommand_from host' -a 'inspect bootstrap'
 complete -c runnerctl -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 EOF
 }
@@ -924,7 +979,7 @@ help_topic_from_args() {
 }
 
 main() {
-  local cmd="${1:-help}" core topic sub
+  local cmd="${1:-help}" core topic sub helper
   case "$cmd" in
     --help|-h) root_help; return ;;
     --version|-v|version) printf '%s\n' "$VERSION"; return ;;
@@ -968,6 +1023,11 @@ main() {
   case "$cmd" in
     doctor)
       if [[ "${2:-}" == "--json" ]]; then cmd_doctor_json; else core="$(find_core)"; bash "$core" doctor | sed -E "s/^version: .*/version: $VERSION/"; fi
+      ;;
+    host)
+      helper="$(find_host_helper)"
+      shift || true
+      exec bash "$helper" "$@"
       ;;
     list)
       if [[ "${2:-}" == "--json" ]]; then cmd_list_json; else exec bash "$(find_core)" "$@"; fi

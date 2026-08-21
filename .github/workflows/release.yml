@@ -11,6 +11,7 @@ on:
       - 'runnerctl-base'
       - 'bin/runnerctl'
       - 'bin/runnerctl-cleanup'
+      - 'bin/runnerctl-host'
       - 'package.json'
       - 'npm/**'
       - 'scripts/package-release.sh'
@@ -146,6 +147,8 @@ jobs:
             dist/runnerctl-core.sha256 \
             dist/runnerctl-cleanup \
             dist/runnerctl-cleanup.sha256 \
+            dist/runnerctl-host \
+            dist/runnerctl-host.sha256 \
             dist/runnerctl-*.tar.gz \
             dist/runnerctl-*.tar.gz.sha256 \
             --title "runnerctl $tag" \
