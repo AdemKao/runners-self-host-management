@@ -28,6 +28,8 @@ jobs:
           bash -n bin/runnerctl-cleanup
           bash -n bin/runnerctl-host
           bash -n bin/runnerctl-ci
+          bash -n bin/runnerctl-hooks
+          bash -n bin/runnerctl-queue
           bash -n install.sh
           bash -n scripts/package-release.sh
           bash -n tests/smoke.sh
@@ -36,6 +38,8 @@ jobs:
           bash -n tests/doctor.sh
           bash -n tests/host.sh
           bash -n tests/ci-check.sh
+          bash -n tests/hooks.sh
+          bash -n tests/queue.sh
 
       - name: Run smoke tests
         run: bash tests/smoke.sh
@@ -51,6 +55,12 @@ jobs:
 
       - name: Run CI compatibility regression tests
         run: bash tests/ci-check.sh
+
+      - name: Run hook composition regression tests
+        run: bash tests/hooks.sh
+
+      - name: Run global queue regression tests
+        run: bash tests/queue.sh
 
       - name: Validate npm package
         run: npm pack --dry-run
