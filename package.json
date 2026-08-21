@@ -1,6 +1,6 @@
 {
   "name": "@ademkao/runnerctl",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Manage GitHub Actions self-hosted runners on macOS and Linux with agent-friendly automation.",
   "license": "MIT",
   "private": false,

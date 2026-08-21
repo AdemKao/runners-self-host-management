@@ -31,12 +31,16 @@ jobs:
           bash -n tests/smoke.sh
           bash -n tests/launchd-status.sh
           bash -n tests/cleanup.sh
+          bash -n tests/doctor.sh
 
       - name: Run smoke tests
         run: bash tests/smoke.sh
 
       - name: Run cleanup regression tests
         run: bash tests/cleanup.sh
+
+      - name: Run doctor regression tests
+        run: bash tests/doctor.sh
 
       - name: Validate npm package
         run: npm pack --dry-run
