@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.0"
+VERSION="0.4.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 RUNNERS_DIR="$RUNNERCTL_HOME/runners"
@@ -41,6 +41,23 @@ find_host_helper() {
     return 0
   done
   printf 'runnerctl: host helper not found. Reinstall runnerctl.\n' >&2
+  exit 1
+}
+
+find_ci_helper() {
+  local candidates=(
+    "${RUNNERCTL_CI_HELPER:-}"
+    "$SCRIPT_DIR/bin/runnerctl-ci"
+    "$SCRIPT_DIR/../libexec/runnerctl-ci"
+    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-ci"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -f "$candidate" ]] || continue
+    printf '%s' "$candidate"
+    return 0
+  done
+  printf 'runnerctl: CI compatibility helper not found. Reinstall runnerctl.\n' >&2
   exit 1
 }
 
@@ -158,6 +175,7 @@ Maintenance:
 Diagnostics & Automation:
   doctor         Check the local runnerctl environment
   host           Inspect or bootstrap host prerequisites
+  ci             Check workflow compatibility for self-hosted runners
   agent          Show the AI-agent automation contract
 
 Other:
@@ -277,6 +295,32 @@ Safety:
 AI AGENT:
   Prefer `runnerctl host inspect --json` and `runnerctl host bootstrap --dry-run --json`
   before allowing package mutations.
+EOF
+      ;;
+    ci)
+      cat <<'EOF'
+Check GitHub Actions workflows before moving jobs to self-hosted runners.
+
+Usage:
+  runnerctl ci check OWNER/REPO [--current-host] [--account ACCOUNT] [--json]
+
+Checks:
+  - Docker-based actions (`runs.using: docker`)
+  - `docker://` actions
+  - service containers and job containers
+  - obvious OS-specific commands such as apt-get and brew
+
+Flags:
+  --current-host      Compare requirements against this machine
+  --account ACCOUNT   GitHub CLI account used for private repository/action reads
+  --json              Emit stable machine-readable JSON
+  -h, --help          Show help
+
+Side effects:
+  None (read-only). The scanner reports recommendations and does not rewrite workflows.
+
+AI AGENT:
+  Run this before replacing GitHub-hosted `runs-on` values with self-hosted labels.
 EOF
       ;;
     auth)
@@ -495,10 +539,11 @@ Recommended discovery sequence:
   5. runnerctl list --json
   6. runnerctl upgrade --check --json
   7. runnerctl auth resolve OWNER/REPO --json
-  8. runnerctl COMMAND --help before a mutation
+  8. runnerctl ci check OWNER/REPO --current-host --json
+  9. runnerctl COMMAND --help before a mutation
 
 Read-only / discovery:
-  doctor, host inspect, host bootstrap --dry-run, list, status
+  doctor, host inspect, host bootstrap --dry-run, ci check, list, status
   auth list, auth status, auth doctor, auth mappings, auth resolve
   upgrade --check
   logs --no-follow, job-logs --no-follow
@@ -517,6 +562,7 @@ Agent rules:
   - Perform read-only discovery before mutation.
   - Never invent repository, account, runner, or label identifiers.
   - Prefer --account or repository mappings over changing global gh state.
+  - Run CI compatibility checks before moving workflows onto self-hosted runners.
   - Use `runnerctl upgrade --check --json` before upgrading when practical.
   - Use --no-follow when reading logs in unattended automation.
   - Never use `remove --yes` without explicit intent for that exact runner.
@@ -545,13 +591,15 @@ agent_json() {
     "runnerctl auth mappings --json",
     "runnerctl list --json",
     "runnerctl upgrade --check --json",
-    "runnerctl auth resolve OWNER/REPO --json"
+    "runnerctl auth resolve OWNER/REPO --json",
+    "runnerctl ci check OWNER/REPO --current-host --json"
   ],
   "commands": {
     "doctor": {"effect": "read-only", "json": true},
     "host inspect": {"effect": "read-only", "json": true},
     "host bootstrap --dry-run": {"effect": "read-only", "json": true},
     "host bootstrap": {"effect": "mutating-system-packages", "json": true},
+    "ci check": {"effect": "read-only-network", "json": true},
     "list": {"effect": "read-only", "json": true},
     "status": {"effect": "read-only", "json": true},
     "auth list": {"effect": "read-only", "json": true},
@@ -582,6 +630,7 @@ agent_json() {
     "Perform read-only discovery before mutation",
     "Never invent repository, account, runner, or label identifiers",
     "Prefer --account or repository mappings over changing global gh state",
+    "Run CI compatibility checks before moving workflows onto self-hosted runners",
     "Check upgrade status before upgrading when practical",
     "Use --no-follow for logs in unattended automation",
     "Require explicit intent before remove --yes",
@@ -900,18 +949,21 @@ cmd_upgrade() {
 completion_bash() {
   cat <<'EOF'
 _runnerctl_complete() {
-  local cur commands auth_commands host_commands
+  local cur commands auth_commands host_commands ci_commands
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
-  commands="add list status logs job-logs start stop restart start-all stop-all remove auth doctor host upgrade self-update agent completion help version"
+  commands="add list status logs job-logs start stop restart start-all stop-all remove auth doctor host ci upgrade self-update agent completion help version"
   auth_commands="list status use login setup-git doctor map unmap mappings resolve"
   host_commands="inspect bootstrap"
+  ci_commands="check"
   if [[ ${COMP_CWORD} -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
   elif [[ "${COMP_WORDS[1]}" == "auth" && ${COMP_CWORD} -eq 2 ]]; then
     COMPREPLY=( $(compgen -W "$auth_commands" -- "$cur") )
   elif [[ "${COMP_WORDS[1]}" == "host" && ${COMP_CWORD} -eq 2 ]]; then
     COMPREPLY=( $(compgen -W "$host_commands" -- "$cur") )
+  elif [[ "${COMP_WORDS[1]}" == "ci" && ${COMP_CWORD} -eq 2 ]]; then
+    COMPREPLY=( $(compgen -W "$ci_commands" -- "$cur") )
   elif [[ "${COMP_WORDS[1]}" == "completion" && ${COMP_CWORD} -eq 2 ]]; then
     COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
   fi
@@ -924,24 +976,28 @@ completion_zsh() {
   cat <<'EOF'
 #compdef runnerctl
 _runnerctl() {
-  local -a commands auth_commands host_commands
+  local -a commands auth_commands host_commands ci_commands
   commands=(
     'add:Register self-hosted runners' 'list:List runners' 'status:Show status'
     'logs:Show runner logs' 'job-logs:Show worker logs' 'start:Start runner'
     'stop:Stop runner' 'restart:Restart runner' 'start-all:Start all runners'
     'stop-all:Stop all runners' 'remove:Remove runner' 'auth:Manage GitHub accounts'
     'doctor:Check environment' 'host:Inspect or bootstrap host prerequisites'
+    'ci:Check workflow compatibility for self-hosted runners'
     'upgrade:Upgrade runnerctl' 'self-update:Upgrade runnerctl'
     'agent:AI agent contract' 'completion:Shell completion' 'help:Command help' 'version:Print version'
   )
   auth_commands=('list' 'status' 'use' 'login' 'setup-git' 'doctor' 'map' 'unmap' 'mappings' 'resolve')
   host_commands=('inspect' 'bootstrap')
+  ci_commands=('check')
   if (( CURRENT == 2 )); then
     _describe 'command' commands
   elif [[ "$words[2]" == auth && CURRENT == 3 ]]; then
     _values 'auth command' $auth_commands
   elif [[ "$words[2]" == host && CURRENT == 3 ]]; then
     _values 'host command' $host_commands
+  elif [[ "$words[2]" == ci && CURRENT == 3 ]]; then
+    _values 'ci command' $ci_commands
   elif [[ "$words[2]" == completion && CURRENT == 3 ]]; then
     _values 'shell' bash zsh fish
   fi
@@ -953,9 +1009,10 @@ EOF
 completion_fish() {
   cat <<'EOF'
 complete -c runnerctl -f
-complete -c runnerctl -n '__fish_use_subcommand' -a 'add list status logs job-logs start stop restart start-all stop-all remove auth doctor host upgrade self-update agent completion help version'
+complete -c runnerctl -n '__fish_use_subcommand' -a 'add list status logs job-logs start stop restart start-all stop-all remove auth doctor host ci upgrade self-update agent completion help version'
 complete -c runnerctl -n '__fish_seen_subcommand_from auth' -a 'list status use login setup-git doctor map unmap mappings resolve'
 complete -c runnerctl -n '__fish_seen_subcommand_from host' -a 'inspect bootstrap'
+complete -c runnerctl -n '__fish_seen_subcommand_from ci' -a 'check'
 complete -c runnerctl -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 EOF
 }
@@ -1026,6 +1083,11 @@ main() {
       ;;
     host)
       helper="$(find_host_helper)"
+      shift || true
+      exec bash "$helper" "$@"
+      ;;
+    ci)
+      helper="$(find_ci_helper)"
       shift || true
       exec bash "$helper" "$@"
       ;;

@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GITHUB_HOST="${RUNNERCTL_GITHUB_HOST:-${GH_HOST:-github.com}}"
+WORKFLOW_DIR_OVERRIDE="${RUNNERCTL_CI_WORKFLOW_DIR:-}"
+ACTION_METADATA_DIR="${RUNNERCTL_CI_ACTION_METADATA_DIR:-}"
+
+usage() {
+  cat <<'EOF'
+Check GitHub Actions workflow compatibility before moving jobs to self-hosted runners.
+
+Usage:
+  runnerctl ci check OWNER/REPO [--current-host] [--account ACCOUNT] [--json]
+
+Flags:
+  --current-host      Compare detected workflow requirements with this machine
+  --account ACCOUNT   GitHub CLI account used to read private repositories/actions
+  --json              Emit machine-readable JSON
+  -h, --help          Show help
+
+Checks:
+  - Docker container actions (`runs.using: docker`)
+  - `docker://` step actions
+  - job `container:` declarations
+  - service containers (`services:`)
+  - obvious OS-specific shell assumptions such as apt-get and brew
+
+The scanner is read-only and never rewrites workflow files.
+EOF
+}
+
+json_quote() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '"%s"' "$value"
+}
+
+slug() {
+  printf '%s' "$1" | tr '/:@ ' '____'
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    printf 'runnerctl: required command not found: %s\n' "$1" >&2
+    return 1
+  }
+}
+
+GH_TOKEN_VALUE=""
+setup_gh_account() {
+  local account="$1"
+  [[ -n "$WORKFLOW_DIR_OVERRIDE" ]] && return 0
+  need_cmd gh
+  if [[ -n "$account" ]]; then
+    GH_TOKEN_VALUE="$(gh auth token --hostname "$GITHUB_HOST" --user "$account" 2>/dev/null)" || {
+      printf 'runnerctl: GitHub account %s is not authenticated for %s\n' "$account" "$GITHUB_HOST" >&2
+      return 1
+    }
+  fi
+}
+
+gh_api_raw() {
+  if [[ -n "$GH_TOKEN_VALUE" ]]; then
+    GH_TOKEN="$GH_TOKEN_VALUE" GH_HOST="$GITHUB_HOST" gh api -H 'Accept: application/vnd.github.raw+json' "$@"
+  else
+    GH_HOST="$GITHUB_HOST" gh api -H 'Accept: application/vnd.github.raw+json' "$@"
+  fi
+}
+
+gh_api_json() {
+  if [[ -n "$GH_TOKEN_VALUE" ]]; then
+    GH_TOKEN="$GH_TOKEN_VALUE" GH_HOST="$GITHUB_HOST" gh api "$@"
+  else
+    GH_HOST="$GITHUB_HOST" gh api "$@"
+  fi
+}
+
+WORK_TMP=""
+cleanup() {
+  [[ -n "$WORK_TMP" && -d "$WORK_TMP" ]] && rm -rf "$WORK_TMP"
+}
+trap cleanup EXIT
+
+prepare_workflows() {
+  local repo="$1" file path name
+  WORK_TMP="$(mktemp -d)"
+  mkdir -p "$WORK_TMP/workflows" "$WORK_TMP/actions"
+
+  if [[ -n "$WORKFLOW_DIR_OVERRIDE" ]]; then
+    [[ -d "$WORKFLOW_DIR_OVERRIDE" ]] || {
+      printf 'runnerctl: workflow directory does not exist: %s\n' "$WORKFLOW_DIR_OVERRIDE" >&2
+      return 1
+    }
+    find "$WORKFLOW_DIR_OVERRIDE" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print | while IFS= read -r file; do
+      cp "$file" "$WORK_TMP/workflows/$(basename "$file")"
+    done
+    return 0
+  fi
+
+  local listing
+  listing="$(gh_api_json "repos/$repo/contents/.github/workflows")" || {
+    printf 'runnerctl: unable to read .github/workflows from %s\n' "$repo" >&2
+    return 1
+  }
+
+  printf '%s' "$listing" | node -e '
+let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+  const v=JSON.parse(s); for(const x of v){ if(x.type==="file" && /\.ya?ml$/i.test(x.name)) console.log(`${x.name}\t${x.path}`); }
+});
+' | while IFS=$'\t' read -r name path; do
+    gh_api_raw "repos/$repo/contents/$path" > "$WORK_TMP/workflows/$name"
+  done
+}
+
+FINDINGS_FILE=""
+init_findings() {
+  FINDINGS_FILE="$WORK_TMP/findings.tsv"
+  : > "$FINDINGS_FILE"
+}
+
+add_finding() {
+  local workflow="$1" kind="$2" subject="$3" requirement="$4" detail="$5"
+  workflow="${workflow//$'\t'/ }"; kind="${kind//$'\t'/ }"; subject="${subject//$'\t'/ }"
+  requirement="${requirement//$'\t'/ }"; detail="${detail//$'\t'/ }"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$workflow" "$kind" "$subject" "$requirement" "$detail" >> "$FINDINGS_FILE"
+}
+
+extract_uses() {
+  sed -nE "s/^[[:space:]-]*uses:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?.*/\1/p" "$1"
+}
+
+action_fixture_path() {
+  local owner="$1" repo="$2" ref="$3" subpath="$4" base
+  [[ -n "$ACTION_METADATA_DIR" ]] || return 1
+  base="$ACTION_METADATA_DIR/$owner/$repo/$ref"
+  [[ -n "$subpath" ]] && base="$base/$subpath"
+  if [[ -f "$base/action.yml" ]]; then printf '%s' "$base/action.yml"; return 0; fi
+  if [[ -f "$base/action.yaml" ]]; then printf '%s' "$base/action.yaml"; return 0; fi
+  return 1
+}
+
+fetch_action_metadata() {
+  local action="$1" current_repo="$2" target="$3"
+  local before_ref ref action_path owner repo subpath fixture cache_key cache_file remote_path
+
+  if [[ "$action" == ./* ]]; then
+    ref="HEAD"
+    owner="${current_repo%%/*}"
+    repo="${current_repo#*/}"
+    subpath="${action#./}"
+    if fixture="$(action_fixture_path "$owner" "$repo" "$ref" "$subpath" 2>/dev/null)"; then
+      cp "$fixture" "$target"; return 0
+    fi
+    [[ -n "$WORKFLOW_DIR_OVERRIDE" ]] && return 1
+    for remote_path in "$subpath/action.yml" "$subpath/action.yaml"; do
+      if gh_api_raw "repos/$current_repo/contents/$remote_path" > "$target" 2>/dev/null; then return 0; fi
+    done
+    return 1
+  fi
+
+  [[ "$action" == *@* ]] || return 1
+  before_ref="${action%@*}"
+  ref="${action##*@}"
+  owner="${before_ref%%/*}"
+  local rest="${before_ref#*/}"
+  [[ "$rest" != "$before_ref" ]] || return 1
+  repo="${rest%%/*}"
+  if [[ "$rest" == */* ]]; then subpath="${rest#*/}"; else subpath=""; fi
+
+  if fixture="$(action_fixture_path "$owner" "$repo" "$ref" "$subpath" 2>/dev/null)"; then
+    cp "$fixture" "$target"; return 0
+  fi
+  [[ -n "$WORKFLOW_DIR_OVERRIDE" ]] && return 1
+
+  cache_key="$(slug "$action")"
+  cache_file="$WORK_TMP/actions/$cache_key"
+  if [[ -f "$cache_file" ]]; then cp "$cache_file" "$target"; return 0; fi
+
+  for remote_path in "${subpath:+$subpath/}action.yml" "${subpath:+$subpath/}action.yaml"; do
+    if gh_api_raw "repos/$owner/$repo/contents/$remote_path?ref=$ref" > "$cache_file" 2>/dev/null; then
+      cp "$cache_file" "$target"; return 0
+    fi
+  done
+  rm -f "$cache_file"
+  return 1
+}
+
+action_uses_docker() {
+  grep -Eiq "^[[:space:]]*using:[[:space:]]*['\"]?docker(['\"]?[[:space:]]*)$" "$1"
+}
+
+scan_workflow() {
+  local repo="$1" file="$2" workflow action metadata line
+  workflow="$(basename "$file")"
+
+  if grep -Eq '^[[:space:]]+services:[[:space:]]*($|#)' "$file"; then
+    add_finding "$workflow" "service-containers" "services" "linux+docker" "GitHub service containers require a Linux self-hosted runner with Docker."
+  fi
+  if grep -Eq '^[[:space:]]+container:[[:space:]]*' "$file"; then
+    add_finding "$workflow" "job-container" "container" "linux+docker" "Containerized jobs require a Linux self-hosted runner with Docker."
+  fi
+
+  while IFS= read -r action; do
+    [[ -n "$action" ]] || continue
+    if [[ "$action" == docker://* ]]; then
+      add_finding "$workflow" "docker-action" "$action" "linux+docker" "docker:// actions require a Linux self-hosted runner with Docker."
+      continue
+    fi
+    [[ "$action" == *'${{'* ]] && {
+      add_finding "$workflow" "dynamic-action" "$action" "unknown" "Action reference is dynamic and could not be resolved statically."
+      continue
+    }
+    metadata="$WORK_TMP/action-metadata.yml"
+    if fetch_action_metadata "$action" "$repo" "$metadata"; then
+      if action_uses_docker "$metadata"; then
+        add_finding "$workflow" "docker-action" "$action" "linux+docker" "Action metadata declares runs.using: docker."
+      fi
+    else
+      case "$action" in
+        actions/*|github/*) : ;;
+        *) add_finding "$workflow" "action-metadata" "$action" "unknown" "Could not resolve action.yml/action.yaml; verify platform compatibility manually." ;;
+      esac
+    fi
+  done < <(extract_uses "$file" | sort -u)
+
+  while IFS=: read -r line _; do
+    add_finding "$workflow" "linux-command" "line $line" "linux" "apt-get usage assumes a Debian/Ubuntu-style Linux environment."
+  done < <(grep -nE '(^|[;&|[:space:]])(sudo[[:space:]]+)?apt-get([[:space:]]|$)' "$file" || true)
+
+  while IFS=: read -r line _; do
+    add_finding "$workflow" "macos-command" "line $line" "macos" "brew usage assumes a macOS/Homebrew environment."
+  done < <(grep -nE '(^|[;&|[:space:]])brew([[:space:]]|$)' "$file" || true)
+}
+
+scan_all() {
+  local repo="$1" file
+  init_findings
+  while IFS= read -r file; do
+    scan_workflow "$repo" "$file"
+  done < <(find "$WORK_TMP/workflows" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print | sort)
+}
+
+REQ_LINUX=false
+REQ_DOCKER=false
+REQ_MACOS=false
+REQ_UNKNOWN=false
+summarize_requirements() {
+  REQ_LINUX=false; REQ_DOCKER=false; REQ_MACOS=false; REQ_UNKNOWN=false
+  local requirement
+  while IFS=$'\t' read -r _ _ _ requirement _; do
+    case "$requirement" in
+      linux) REQ_LINUX=true ;;
+      linux+docker) REQ_LINUX=true; REQ_DOCKER=true ;;
+      macos) REQ_MACOS=true ;;
+      unknown) REQ_UNKNOWN=true ;;
+    esac
+  done < "$FINDINGS_FILE"
+}
+
+HOST_OS=""
+HOST_DOCKER=false
+HOST_DOCKER_DAEMON=false
+HOST_COMPATIBLE=true
+collect_current_host() {
+  HOST_OS="$(uname -s)"
+  HOST_DOCKER=false; HOST_DOCKER_DAEMON=false; HOST_COMPATIBLE=true
+  command -v docker >/dev/null 2>&1 && HOST_DOCKER=true
+  if [[ "$HOST_DOCKER" == true ]] && docker info >/dev/null 2>&1; then HOST_DOCKER_DAEMON=true; fi
+
+  if [[ "$REQ_LINUX" == true && "$HOST_OS" != "Linux" ]]; then HOST_COMPATIBLE=false; fi
+  if [[ "$REQ_MACOS" == true && "$HOST_OS" != "Darwin" ]]; then HOST_COMPATIBLE=false; fi
+  if [[ "$REQ_DOCKER" == true && "$HOST_DOCKER_DAEMON" != true ]]; then HOST_COMPATIBLE=false; fi
+  if [[ "$REQ_LINUX" == true && "$REQ_MACOS" == true ]]; then HOST_COMPATIBLE=false; fi
+}
+
+print_findings_json() {
+  local first=true workflow kind subject requirement detail
+  printf '['
+  while IFS=$'\t' read -r workflow kind subject requirement detail; do
+    [[ -n "$workflow" ]] || continue
+    [[ "$first" == true ]] || printf ','
+    printf '{"workflow":'; json_quote "$workflow"
+    printf ',"kind":'; json_quote "$kind"
+    printf ',"subject":'; json_quote "$subject"
+    printf ',"requirement":'; json_quote "$requirement"
+    printf ',"detail":'; json_quote "$detail"; printf '}'
+    first=false
+  done < "$FINDINGS_FILE"
+  printf ']'
+}
+
+recommendation() {
+  if [[ "$REQ_LINUX" == true && "$REQ_DOCKER" == true ]]; then
+    printf 'Use a Linux self-hosted runner with Docker for the affected jobs.'
+  elif [[ "$REQ_LINUX" == true ]]; then
+    printf 'Use a Linux self-hosted runner for the affected jobs.'
+  elif [[ "$REQ_MACOS" == true ]]; then
+    printf 'Use a macOS self-hosted runner for the affected jobs.'
+  elif [[ "$REQ_UNKNOWN" == true ]]; then
+    printf 'Resolve unknown action metadata before assuming cross-platform compatibility.'
+  else
+    printf 'No platform-specific incompatibilities were detected by the static checks.'
+  fi
+}
+
+print_json() {
+  local repo="$1" current_host="$2" count
+  count="$(awk 'NF {n++} END {print n+0}' "$FINDINGS_FILE")"
+  printf '{"repository":'; json_quote "$repo"
+  printf ',"finding_count":%s,"findings":' "$count"; print_findings_json
+  printf ',"requirements":{"linux":%s,"docker":%s,"macos":%s,"unknown":%s}' "$REQ_LINUX" "$REQ_DOCKER" "$REQ_MACOS" "$REQ_UNKNOWN"
+  if [[ "$current_host" -eq 1 ]]; then
+    collect_current_host
+    printf ',"current_host":{"os":'; json_quote "$HOST_OS"
+    printf ',"docker":%s,"docker_daemon":%s,"compatible":%s}' "$HOST_DOCKER" "$HOST_DOCKER_DAEMON" "$HOST_COMPATIBLE"
+  else
+    printf ',"current_host":null'
+  fi
+  printf ',"recommendation":'; json_quote "$(recommendation)"; printf '}\n'
+}
+
+print_text() {
+  local repo="$1" current_host="$2" workflow kind subject requirement detail current="" count=0
+  printf 'runnerctl ci check %s\n' "$repo"
+  printf 'Workflow compatibility\n'
+  while IFS=$'\t' read -r workflow kind subject requirement detail; do
+    [[ -n "$workflow" ]] || continue
+    if [[ "$workflow" != "$current" ]]; then
+      printf '\n%s\n' "$workflow"
+      current="$workflow"
+    fi
+    if [[ "$requirement" == "unknown" ]]; then
+      printf '  ! %s\n' "$subject"
+    else
+      printf '  x %s\n' "$subject"
+    fi
+    printf '    %s\n' "$detail"
+    printf '    requires: %s\n' "$requirement"
+    count=$((count + 1))
+  done < "$FINDINGS_FILE"
+  if [[ "$count" -eq 0 ]]; then printf '  No platform-specific findings.\n'; fi
+
+  printf '\nRequirements\n'
+  printf '  Linux:  %s\n' "$REQ_LINUX"
+  printf '  Docker: %s\n' "$REQ_DOCKER"
+  printf '  macOS:  %s\n' "$REQ_MACOS"
+  printf '  Unknown action metadata: %s\n' "$REQ_UNKNOWN"
+
+  if [[ "$current_host" -eq 1 ]]; then
+    collect_current_host
+    printf '\nCurrent host\n'
+    printf '  OS: %s\n' "$HOST_OS"
+    printf '  Docker daemon: %s\n' "$HOST_DOCKER_DAEMON"
+    printf '  Result: %s\n' "$([[ "$HOST_COMPATIBLE" == true ]] && printf COMPATIBLE || printf INCOMPATIBLE)"
+  fi
+
+  printf '\nRecommendation: %s\n' "$(recommendation)"
+}
+
+cmd_check() {
+  local repo="${1:-}" json=0 current_host=0 account=""
+  [[ "$repo" =~ ^[^/]+/[^/]+$ ]] || {
+    printf 'runnerctl: ci check requires OWNER/REPO\n' >&2
+    return 2
+  }
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      --current-host) current_host=1; shift ;;
+      --account) account="${2:-}"; [[ -n "$account" ]] || { printf 'runnerctl: --account requires a value\n' >&2; return 2; }; shift 2 ;;
+      --help|-h) usage; return ;;
+      *) printf 'runnerctl: unknown ci check option: %s\n' "$1" >&2; return 2 ;;
+    esac
+  done
+
+  setup_gh_account "$account"
+  prepare_workflows "$repo"
+  scan_all "$repo"
+  summarize_requirements
+
+  if [[ "$json" -eq 1 ]]; then print_json "$repo" "$current_host"; else print_text "$repo" "$current_host"; fi
+}
+
+main() {
+  local command="${1:-}"
+  shift || true
+  case "$command" in
+    check) cmd_check "$@" ;;
+    --help|-h|help|"") usage ;;
+    *) printf 'runnerctl: unknown ci command: %s\n' "$command" >&2; usage >&2; return 2 ;;
+  esac
+}
+
+main "$@"

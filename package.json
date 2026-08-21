@@ -1,6 +1,6 @@
 {
   "name": "@ademkao/runnerctl",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Manage GitHub Actions self-hosted runners on macOS and Linux with agent-friendly automation.",
   "license": "MIT",
   "private": false,
@@ -13,6 +13,7 @@
     "bin/runnerctl",
     "bin/runnerctl-cleanup",
     "bin/runnerctl-host",
+    "bin/runnerctl-ci",
     "npm/runnerctl.js",
     "AGENTS.md",
     "CLAUDE.md",
@@ -23,7 +24,7 @@
   ],
   "scripts": {
     "test": "bash tests/smoke.sh",
-    "prepack": "bash -n runnerctl && bash -n runnerctl-base && bash -n bin/runnerctl && bash -n bin/runnerctl-cleanup && bash -n bin/runnerctl-host && node --check npm/runnerctl.js"
+    "prepack": "bash -n runnerctl && bash -n runnerctl-base && bash -n bin/runnerctl && bash -n bin/runnerctl-cleanup && bash -n bin/runnerctl-host && bash -n bin/runnerctl-ci && node --check npm/runnerctl.js"
   },
   "repository": {
     "type": "git",
