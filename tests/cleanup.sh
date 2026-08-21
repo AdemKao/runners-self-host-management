@@ -36,13 +36,17 @@ node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); 
 
 run cleanup enable example-runner-01 >/dev/null
 hook="$tmp/data/hooks/example-runner-01/job-completed-cleanup.sh"
+dispatcher="$tmp/data/hooks/example-runner-01/job-completed-dispatch.sh"
+handler="$tmp/data/hooks/example-runner-01/completed.d/cleanup.sh"
 [[ -x "$hook" ]]
-grep -Fq "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$hook" "$runner/.env"
+[[ -x "$dispatcher" ]]
+[[ -x "$handler" ]]
+grep -Fq "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$dispatcher" "$runner/.env"
 
 node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.enabled || x.name!=="example-runner-01" || x.workspace_kb<=0) process.exit(1)' \
   < <(run cleanup status example-runner-01 --json)
 
-HOME="$tmp/home" GITHUB_WORKSPACE="$workspace" bash "$hook" >/dev/null
+HOME="$tmp/home" GITHUB_WORKSPACE="$workspace" bash "$dispatcher" >/dev/null
 [[ -d "$workspace" ]]
 [[ -z "$(find "$workspace" -mindepth 1 -maxdepth 1 -print -quit)" ]]
 [[ -f "$cache/content" ]]
@@ -55,5 +59,7 @@ run cleanup run example-runner-01 >/dev/null
 run cleanup disable example-runner-01 >/dev/null
 ! grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=' "$runner/.env"
 [[ ! -e "$hook" ]]
+[[ ! -e "$handler" ]]
+[[ ! -e "$dispatcher" ]]
 
 echo "cleanup tests passed"

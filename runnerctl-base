@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.1"
+VERSION="0.4.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 RUNNERS_DIR="$RUNNERCTL_HOME/runners"
@@ -58,6 +58,23 @@ find_ci_helper() {
     return 0
   done
   printf 'runnerctl: CI compatibility helper not found. Reinstall runnerctl.\n' >&2
+  exit 1
+}
+
+find_queue_helper() {
+  local candidates=(
+    "${RUNNERCTL_QUEUE_HELPER:-}"
+    "$SCRIPT_DIR/bin/runnerctl-queue"
+    "$SCRIPT_DIR/../libexec/runnerctl-queue"
+    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-queue"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -f "$candidate" ]] || continue
+    printf '%s' "$candidate"
+    return 0
+  done
+  printf 'runnerctl: queue helper not found. Reinstall runnerctl.\n' >&2
   exit 1
 }
 
@@ -176,6 +193,8 @@ Diagnostics & Automation:
   doctor         Check the local runnerctl environment
   host           Inspect or bootstrap host prerequisites
   ci             Check workflow compatibility for self-hosted runners
+  capacity       Estimate safe host concurrency
+  queue          Manage host-wide job execution concurrency
   agent          Show the AI-agent automation contract
 
 Other:
@@ -321,6 +340,44 @@ Side effects:
 
 AI AGENT:
   Run this before replacing GitHub-hosted `runs-on` values with self-hosted labels.
+EOF
+      ;;
+    capacity)
+      cat <<'EOF'
+Estimate safe job concurrency from this host's CPU and memory.
+
+Usage:
+  runnerctl capacity [--json]
+
+The estimate is intentionally conservative. Hosts below 2 GiB RAM recommend a
+single lightweight job and zero concurrent Node/Docker-heavy builds.
+
+Side effects:
+  None (read-only).
+EOF
+      ;;
+    queue)
+      cat <<'EOF'
+Manage a host-wide execution gate across all runnerctl-managed runners.
+
+Usage:
+  runnerctl queue status [--json]
+  runnerctl queue enable [--max-concurrency N]
+  runnerctl queue disable
+  runnerctl queue set --max-concurrency N
+  runnerctl queue drain
+  runnerctl queue resume
+
+Behavior:
+  - All repository-specific runner services remain online.
+  - GitHub still assigns jobs to matching runners.
+  - A runnerctl pre-job hook waits for a host-wide slot before workflow steps run.
+  - Completion hooks release the slot.
+  - `drain` blocks new slot acquisition without terminating active jobs.
+
+Side effects:
+  `status` is read-only. Other queue commands mutate local hook/config state and
+  may restart managed runner services so hook environment changes take effect.
 EOF
       ;;
     auth)
@@ -534,23 +591,24 @@ runnerctl exposes an automation contract for coding agents and CI tooling.
 Recommended discovery sequence:
   1. runnerctl doctor --json
   2. runnerctl host inspect --json
-  3. runnerctl auth list --json
-  4. runnerctl auth mappings --json
-  5. runnerctl list --json
-  6. runnerctl upgrade --check --json
-  7. runnerctl auth resolve OWNER/REPO --json
-  8. runnerctl ci check OWNER/REPO --current-host --json
-  9. runnerctl COMMAND --help before a mutation
+  3. runnerctl capacity --json
+  4. runnerctl queue status --json
+  5. runnerctl auth list --json
+  6. runnerctl auth mappings --json
+  7. runnerctl list --json
+  8. runnerctl upgrade --check --json
+  9. runnerctl auth resolve OWNER/REPO --json
+  10. runnerctl ci check OWNER/REPO --current-host --json
+  11. runnerctl COMMAND --help before a mutation
 
 Read-only / discovery:
-  doctor, host inspect, host bootstrap --dry-run, ci check, list, status
-  auth list, auth status, auth doctor, auth mappings, auth resolve
-  upgrade --check
-  logs --no-follow, job-logs --no-follow
-  version, agent, completion
+  doctor, host inspect, host bootstrap --dry-run, ci check, capacity, queue status
+  list, status, auth list, auth status, auth doctor, auth mappings, auth resolve
+  upgrade --check, logs --no-follow, job-logs --no-follow, version, agent, completion
 
 Mutating:
   host bootstrap
+  queue enable, queue disable, queue set, queue drain, queue resume
   auth use, auth login, auth setup-git, auth map, auth unmap
   add, start, stop, restart, start-all, stop-all
   upgrade, self-update
@@ -563,6 +621,8 @@ Agent rules:
   - Never invent repository, account, runner, or label identifiers.
   - Prefer --account or repository mappings over changing global gh state.
   - Run CI compatibility checks before moving workflows onto self-hosted runners.
+  - Inspect capacity before increasing host queue concurrency.
+  - Draining the queue must not terminate running jobs.
   - Use `runnerctl upgrade --check --json` before upgrading when practical.
   - Use --no-follow when reading logs in unattended automation.
   - Never use `remove --yes` without explicit intent for that exact runner.
@@ -587,6 +647,8 @@ agent_json() {
   "discovery_sequence": [
     "runnerctl doctor --json",
     "runnerctl host inspect --json",
+    "runnerctl capacity --json",
+    "runnerctl queue status --json",
     "runnerctl auth list --json",
     "runnerctl auth mappings --json",
     "runnerctl list --json",
@@ -600,6 +662,13 @@ agent_json() {
     "host bootstrap --dry-run": {"effect": "read-only", "json": true},
     "host bootstrap": {"effect": "mutating-system-packages", "json": true},
     "ci check": {"effect": "read-only-network", "json": true},
+    "capacity": {"effect": "read-only", "json": true},
+    "queue status": {"effect": "read-only", "json": true},
+    "queue enable": {"effect": "mutating-local-config-and-service"},
+    "queue disable": {"effect": "mutating-local-config-and-service"},
+    "queue set": {"effect": "mutating-local-config"},
+    "queue drain": {"effect": "mutating-local-config"},
+    "queue resume": {"effect": "mutating-local-config"},
     "list": {"effect": "read-only", "json": true},
     "status": {"effect": "read-only", "json": true},
     "auth list": {"effect": "read-only", "json": true},
@@ -631,6 +700,8 @@ agent_json() {
     "Never invent repository, account, runner, or label identifiers",
     "Prefer --account or repository mappings over changing global gh state",
     "Run CI compatibility checks before moving workflows onto self-hosted runners",
+    "Inspect host capacity before increasing queue concurrency",
+    "Do not terminate active jobs when draining or lowering queue concurrency",
     "Check upgrade status before upgrading when practical",
     "Use --no-follow for logs in unattended automation",
     "Require explicit intent before remove --yes",
@@ -949,13 +1020,14 @@ cmd_upgrade() {
 completion_bash() {
   cat <<'EOF'
 _runnerctl_complete() {
-  local cur commands auth_commands host_commands ci_commands
+  local cur commands auth_commands host_commands ci_commands queue_commands
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
-  commands="add list status logs job-logs start stop restart start-all stop-all remove auth doctor host ci upgrade self-update agent completion help version"
+  commands="add list status logs job-logs start stop restart start-all stop-all remove auth doctor host ci capacity queue upgrade self-update agent completion help version"
   auth_commands="list status use login setup-git doctor map unmap mappings resolve"
   host_commands="inspect bootstrap"
   ci_commands="check"
+  queue_commands="status enable disable set drain resume"
   if [[ ${COMP_CWORD} -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
   elif [[ "${COMP_WORDS[1]}" == "auth" && ${COMP_CWORD} -eq 2 ]]; then
@@ -964,6 +1036,8 @@ _runnerctl_complete() {
     COMPREPLY=( $(compgen -W "$host_commands" -- "$cur") )
   elif [[ "${COMP_WORDS[1]}" == "ci" && ${COMP_CWORD} -eq 2 ]]; then
     COMPREPLY=( $(compgen -W "$ci_commands" -- "$cur") )
+  elif [[ "${COMP_WORDS[1]}" == "queue" && ${COMP_CWORD} -eq 2 ]]; then
+    COMPREPLY=( $(compgen -W "$queue_commands" -- "$cur") )
   elif [[ "${COMP_WORDS[1]}" == "completion" && ${COMP_CWORD} -eq 2 ]]; then
     COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
   fi
@@ -976,20 +1050,21 @@ completion_zsh() {
   cat <<'EOF'
 #compdef runnerctl
 _runnerctl() {
-  local -a commands auth_commands host_commands ci_commands
+  local -a commands auth_commands host_commands ci_commands queue_commands
   commands=(
     'add:Register self-hosted runners' 'list:List runners' 'status:Show status'
     'logs:Show runner logs' 'job-logs:Show worker logs' 'start:Start runner'
     'stop:Stop runner' 'restart:Restart runner' 'start-all:Start all runners'
     'stop-all:Stop all runners' 'remove:Remove runner' 'auth:Manage GitHub accounts'
     'doctor:Check environment' 'host:Inspect or bootstrap host prerequisites'
-    'ci:Check workflow compatibility for self-hosted runners'
-    'upgrade:Upgrade runnerctl' 'self-update:Upgrade runnerctl'
+    'ci:Check workflow compatibility for self-hosted runners' 'capacity:Estimate safe host concurrency'
+    'queue:Manage host-wide job concurrency' 'upgrade:Upgrade runnerctl' 'self-update:Upgrade runnerctl'
     'agent:AI agent contract' 'completion:Shell completion' 'help:Command help' 'version:Print version'
   )
   auth_commands=('list' 'status' 'use' 'login' 'setup-git' 'doctor' 'map' 'unmap' 'mappings' 'resolve')
   host_commands=('inspect' 'bootstrap')
   ci_commands=('check')
+  queue_commands=('status' 'enable' 'disable' 'set' 'drain' 'resume')
   if (( CURRENT == 2 )); then
     _describe 'command' commands
   elif [[ "$words[2]" == auth && CURRENT == 3 ]]; then
@@ -998,6 +1073,8 @@ _runnerctl() {
     _values 'host command' $host_commands
   elif [[ "$words[2]" == ci && CURRENT == 3 ]]; then
     _values 'ci command' $ci_commands
+  elif [[ "$words[2]" == queue && CURRENT == 3 ]]; then
+    _values 'queue command' $queue_commands
   elif [[ "$words[2]" == completion && CURRENT == 3 ]]; then
     _values 'shell' bash zsh fish
   fi
@@ -1009,10 +1086,11 @@ EOF
 completion_fish() {
   cat <<'EOF'
 complete -c runnerctl -f
-complete -c runnerctl -n '__fish_use_subcommand' -a 'add list status logs job-logs start stop restart start-all stop-all remove auth doctor host ci upgrade self-update agent completion help version'
+complete -c runnerctl -n '__fish_use_subcommand' -a 'add list status logs job-logs start stop restart start-all stop-all remove auth doctor host ci capacity queue upgrade self-update agent completion help version'
 complete -c runnerctl -n '__fish_seen_subcommand_from auth' -a 'list status use login setup-git doctor map unmap mappings resolve'
 complete -c runnerctl -n '__fish_seen_subcommand_from host' -a 'inspect bootstrap'
 complete -c runnerctl -n '__fish_seen_subcommand_from ci' -a 'check'
+complete -c runnerctl -n '__fish_seen_subcommand_from queue' -a 'status enable disable set drain resume'
 complete -c runnerctl -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 EOF
 }
@@ -1088,6 +1166,16 @@ main() {
       ;;
     ci)
       helper="$(find_ci_helper)"
+      shift || true
+      exec bash "$helper" "$@"
+      ;;
+    capacity)
+      helper="$(find_queue_helper)"
+      shift || true
+      exec bash "$helper" capacity "$@"
+      ;;
+    queue)
+      helper="$(find_queue_helper)"
       shift || true
       exec bash "$helper" "$@"
       ;;

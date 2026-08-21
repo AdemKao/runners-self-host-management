@@ -14,15 +14,19 @@ install -m 0755 "$ROOT/bin/runnerctl" "$DIST_DIR/runnerctl-core"
 install -m 0755 "$ROOT/bin/runnerctl-cleanup" "$DIST_DIR/runnerctl-cleanup"
 install -m 0755 "$ROOT/bin/runnerctl-host" "$DIST_DIR/runnerctl-host"
 install -m 0755 "$ROOT/bin/runnerctl-ci" "$DIST_DIR/runnerctl-ci"
+install -m 0755 "$ROOT/bin/runnerctl-hooks" "$DIST_DIR/runnerctl-hooks"
+install -m 0755 "$ROOT/bin/runnerctl-queue" "$DIST_DIR/runnerctl-queue"
 install -m 0755 "$ROOT/bin/runnerctl" "$DIST_DIR/bin/runnerctl"
 install -m 0755 "$ROOT/bin/runnerctl-cleanup" "$DIST_DIR/bin/runnerctl-cleanup"
 install -m 0755 "$ROOT/bin/runnerctl-host" "$DIST_DIR/bin/runnerctl-host"
 install -m 0755 "$ROOT/bin/runnerctl-ci" "$DIST_DIR/bin/runnerctl-ci"
+install -m 0755 "$ROOT/bin/runnerctl-hooks" "$DIST_DIR/bin/runnerctl-hooks"
+install -m 0755 "$ROOT/bin/runnerctl-queue" "$DIST_DIR/bin/runnerctl-queue"
 
 # Keep the source-compatible layout inside the tarball so the public dispatcher
 # can resolve runnerctl-base and helpers after extraction.
 tar -czf "$DIST_DIR/runnerctl-${VERSION}.tar.gz" \
-  -C "$DIST_DIR" runnerctl runnerctl-base bin/runnerctl bin/runnerctl-cleanup bin/runnerctl-host bin/runnerctl-ci
+  -C "$DIST_DIR" runnerctl runnerctl-base bin/runnerctl bin/runnerctl-cleanup bin/runnerctl-host bin/runnerctl-ci bin/runnerctl-hooks bin/runnerctl-queue
 
 checksum() {
   local file="$1" hash
@@ -37,7 +41,7 @@ checksum() {
   printf '%s  %s\n' "$hash" "$(basename "$file")"
 }
 
-for artifact in runnerctl runnerctl-base runnerctl-core runnerctl-cleanup runnerctl-host runnerctl-ci "runnerctl-${VERSION}.tar.gz"; do
+for artifact in runnerctl runnerctl-base runnerctl-core runnerctl-cleanup runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue "runnerctl-${VERSION}.tar.gz"; do
   checksum "$DIST_DIR/$artifact" > "$DIST_DIR/$artifact.sha256"
 done
 

@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
+RUNNERS_DIR="$RUNNERCTL_HOME/runners"
+HOOKS_DIR="$RUNNERCTL_HOME/hooks"
+
+info(){ printf '[runnerctl-hooks] %s\n' "$*"; }
+die(){ printf '[runnerctl-hooks] ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage(){
+  cat <<'EOF'
+Internal runnerctl hook composer.
+
+Usage:
+  runnerctl-hooks register RUNNER started|completed NAME TARGET
+  runnerctl-hooks unregister RUNNER started|completed NAME
+  runnerctl-hooks has RUNNER started|completed NAME
+
+This helper composes multiple runnerctl-managed GitHub runner hooks without
+silently replacing a user-configured custom hook.
+EOF
+}
+
+runner_dir(){ printf '%s/%s' "$RUNNERS_DIR" "$1"; }
+phase_key(){
+  case "$1" in
+    started) printf 'ACTIONS_RUNNER_HOOK_JOB_STARTED' ;;
+    completed) printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED' ;;
+    *) die "Hook phase must be started or completed" ;;
+  esac
+}
+phase_dir(){ printf '%s/%s/%s.d' "$HOOKS_DIR" "$1" "$2"; }
+dispatcher_path(){ printf '%s/%s/job-%s-dispatch.sh' "$HOOKS_DIR" "$1" "$2"; }
+handler_path(){ printf '%s/%s.sh' "$(phase_dir "$1" "$2")" "$3"; }
+legacy_cleanup_path(){ printf '%s/%s/job-completed-cleanup.sh' "$HOOKS_DIR" "$1"; }
+
+require_runner(){
+  local d; d="$(runner_dir "$1")"
+  [[ -d "$d" && -f "$d/.runnerctl-meta" ]] || die "Unknown runner: $1"
+  printf '%s' "$d"
+}
+
+env_value(){
+  local d="$1" key="$2"
+  awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$d/.env" 2>/dev/null || true
+}
+
+set_env_value(){
+  local d="$1" key="$2" value="$3" tmp
+  tmp="$(mktemp)"
+  [[ -f "$d/.env" ]] && awk -F= -v k="$key" '$1!=k' "$d/.env" >"$tmp"
+  printf '%s=%s\n' "$key" "$value" >>"$tmp"
+  mv "$tmp" "$d/.env"
+}
+
+remove_env_value(){
+  local d="$1" key="$2" tmp
+  tmp="$(mktemp)"
+  [[ -f "$d/.env" ]] && awk -F= -v k="$key" '$1!=k' "$d/.env" >"$tmp"
+  mv "$tmp" "$d/.env"
+}
+
+write_dispatcher(){
+  local runner="$1" phase="$2" path dir
+  path="$(dispatcher_path "$runner" "$phase")"
+  dir="$(phase_dir "$runner" "$phase")"
+  mkdir -p "$dir"
+  if [[ "$phase" == started ]]; then
+    cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -u
+handlers="$dir"
+status=0
+for handler in "\$handlers"/*.sh; do
+  [[ -x "\$handler" ]] || continue
+  "\$handler" || status=\$?
+  [[ \$status -eq 0 ]] || exit "\$status"
+done
+exit 0
+EOF
+  else
+    cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -u
+handlers="$dir"
+status=0
+for handler in "\$handlers"/*.sh; do
+  [[ -x "\$handler" ]] || continue
+  if ! "\$handler"; then
+    printf '[runnerctl-hooks] completion handler failed: %s\\n' "\$handler" >&2
+    status=1
+  fi
+done
+# Completion hooks must not make a completed workflow job fail.
+exit 0
+EOF
+  fi
+  chmod 0755 "$path"
+}
+
+register_target(){
+  local runner="$1" phase="$2" name="$3" target="$4" path
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid hook name: $name"
+  [[ -f "$target" ]] || die "Hook target does not exist: $target"
+  path="$(handler_path "$runner" "$phase" "$name")"
+  mkdir -p "$(dirname "$path")"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+exec "$target" "\$@"
+EOF
+  chmod 0755 "$path"
+}
+
+migrate_legacy_cleanup_if_needed(){
+  local runner="$1" phase="$2" current="$3" legacy
+  [[ "$phase" == completed ]] || return 1
+  legacy="$(legacy_cleanup_path "$runner")"
+  [[ "$current" == "$legacy" && -f "$legacy" ]] || return 1
+  register_target "$runner" completed cleanup "$legacy"
+  return 0
+}
+
+ensure_dispatcher(){
+  local runner="$1" phase="$2" d key dispatcher current
+  d="$(require_runner "$runner")"
+  key="$(phase_key "$phase")"
+  dispatcher="$(dispatcher_path "$runner" "$phase")"
+  current="$(env_value "$d" "$key")"
+
+  if [[ -n "$current" && "$current" != "$dispatcher" ]]; then
+    if ! migrate_legacy_cleanup_if_needed "$runner" "$phase" "$current"; then
+      die "Custom $phase hook already configured: $current"
+    fi
+  fi
+
+  write_dispatcher "$runner" "$phase"
+  set_env_value "$d" "$key" "$dispatcher"
+}
+
+register_one(){
+  local runner="$1" phase="$2" name="$3" target="$4"
+  require_runner "$runner" >/dev/null
+  ensure_dispatcher "$runner" "$phase"
+  register_target "$runner" "$phase" "$name" "$target"
+  info "registered $phase hook $name for $runner"
+}
+
+unregister_one(){
+  local runner="$1" phase="$2" name="$3" d key dispatcher dir path current
+  d="$(require_runner "$runner")"
+  key="$(phase_key "$phase")"
+  dispatcher="$(dispatcher_path "$runner" "$phase")"
+  dir="$(phase_dir "$runner" "$phase")"
+  path="$(handler_path "$runner" "$phase" "$name")"
+  current="$(env_value "$d" "$key")"
+
+  rm -f "$path"
+  if ! find "$dir" -maxdepth 1 -type f -name '*.sh' -print -quit 2>/dev/null | grep -q .; then
+    rmdir "$dir" 2>/dev/null || true
+    if [[ -z "$current" || "$current" == "$dispatcher" ]]; then
+      remove_env_value "$d" "$key"
+      rm -f "$dispatcher"
+    fi
+  else
+    [[ "$current" == "$dispatcher" ]] || die "Refusing to alter custom $phase hook: $current"
+    write_dispatcher "$runner" "$phase"
+  fi
+  info "unregistered $phase hook $name for $runner"
+}
+
+has_one(){
+  local runner="$1" phase="$2" name="$3" d key dispatcher path current
+  d="$(require_runner "$runner")"
+  key="$(phase_key "$phase")"
+  dispatcher="$(dispatcher_path "$runner" "$phase")"
+  path="$(handler_path "$runner" "$phase" "$name")"
+  current="$(env_value "$d" "$key")"
+  [[ "$current" == "$dispatcher" && -x "$dispatcher" && -x "$path" ]]
+}
+
+main(){
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    register)
+      [[ $# -eq 4 ]] || die "register requires RUNNER PHASE NAME TARGET"
+      register_one "$1" "$2" "$3" "$4"
+      ;;
+    unregister)
+      [[ $# -eq 3 ]] || die "unregister requires RUNNER PHASE NAME"
+      unregister_one "$1" "$2" "$3"
+      ;;
+    has)
+      [[ $# -eq 3 ]] || die "has requires RUNNER PHASE NAME"
+      has_one "$1" "$2" "$3"
+      ;;
+    help|--help|-h|"") usage ;;
+    *) die "Unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"
