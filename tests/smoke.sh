@@ -25,7 +25,7 @@ bash "$ROOT/runnerctl" --help | grep -q 'upgrade'
 bash "$ROOT/runnerctl" --help | grep -q 'AI AGENT:'
 bash "$ROOT/runnerctl" add --help | grep -q 'Side effects:'
 bash "$ROOT/runnerctl" host --help | grep -q 'host prerequisites'
-bash "$ROOT/runnerctl" ci --help | grep -q 'workflow compatibility'
+bash "$ROOT/runnerctl" ci --help | grep -q 'GitHub Actions workflows'
 bash "$ROOT/runnerctl" upgrade --help | grep -q 'runnerctl upgrade --check --json'
 bash "$ROOT/runnerctl" self-update --help | grep -q 'Check for or install the latest runnerctl release.'
 bash "$ROOT/runnerctl" help auth map | grep -q 'Map a repository'
@@ -140,7 +140,7 @@ PREFIX="$tmp/local" bash "$ROOT/install.sh" >/dev/null
 [[ "$($tmp/local/bin/runnerctl version)" == "$VERSION" ]]
 $tmp/local/bin/runnerctl agent --json | grep -q '"agent_ready": true'
 $tmp/local/bin/runnerctl host --help | grep -q 'host prerequisites'
-$tmp/local/bin/runnerctl ci --help | grep -q 'workflow compatibility'
+$tmp/local/bin/runnerctl ci --help | grep -q 'GitHub Actions workflows'
 
 DIST_DIR="$tmp/dist" bash "$ROOT/scripts/package-release.sh" >/dev/null
 [[ -x "$tmp/dist/runnerctl" ]]
