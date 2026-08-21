@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 RUNNERS_DIR="$RUNNERCTL_HOME/runners"
+GITHUB_HOST="${RUNNERCTL_GITHUB_HOST:-${GH_HOST:-github.com}}"
 
 find_base() {
   local candidates=(
@@ -196,6 +197,298 @@ run_add_with_cleanup() {
   return "$rc"
 }
 
+doctor_json_quote() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '"%s"' "$value"
+}
+
+doctor_os_value() {
+  local key="$1" file="${RUNNERCTL_DOCTOR_OS_RELEASE_FILE:-/etc/os-release}" line value
+  [[ -r "$file" ]] || return 0
+  line="$(grep -m1 "^${key}=" "$file" 2>/dev/null || true)"
+  [[ -n "$line" ]] || return 0
+  value="${line#*=}"
+  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+    value="${value#\"}"
+    value="${value%\"}"
+  elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+    value="${value#\'}"
+    value="${value%\'}"
+  fi
+  printf '%s' "$value"
+}
+
+doctor_os_compatibility() {
+  local os="$1" id="$2" version="$3" major="" lower_id
+  lower_id="$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')"
+  major="$(printf '%s' "$version" | sed -E 's/^([0-9]+).*/\1/;t;d')"
+
+  if [[ "$os" == "Darwin" ]]; then
+    printf 'compatible|macOS self-hosted runner'
+    return
+  fi
+  if [[ "$os" != "Linux" ]]; then
+    printf 'unknown|unsupported platform family'
+    return
+  fi
+
+  case "$lower_id" in
+    centos|rhel|rocky|almalinux|ol)
+      if [[ "$major" =~ ^[0-9]+$ ]] && (( 10#$major < 8 )); then
+        printf 'unsupported|RHEL-compatible Linux older than version 8'
+      elif [[ "$major" =~ ^[0-9]+$ ]]; then
+        printf 'compatible|RHEL-compatible Linux 8+'
+      else
+        printf 'unknown|unable to determine RHEL-compatible major version'
+      fi
+      ;;
+    ubuntu)
+      if [[ "$major" =~ ^[0-9]+$ ]] && (( 10#$major < 20 )); then
+        printf 'unsupported|Ubuntu older than 20.04'
+      else
+        printf 'compatible|Ubuntu Linux'
+      fi
+      ;;
+    debian)
+      if [[ "$major" =~ ^[0-9]+$ ]] && (( 10#$major < 10 )); then
+        printf 'unsupported|Debian older than version 10'
+      else
+        printf 'compatible|Debian Linux'
+      fi
+      ;;
+    fedora)
+      printf 'compatible|Fedora Linux'
+      ;;
+    "")
+      printf 'unknown|distribution metadata unavailable'
+      ;;
+    *)
+      printf 'unknown|distribution is not in runnerctl compatibility rules'
+      ;;
+  esac
+}
+
+doctor_memory_kb() {
+  local file="${RUNNERCTL_DOCTOR_MEMINFO_FILE:-/proc/meminfo}" os="$1" value
+  if [[ "$os" == "Linux" && -r "$file" ]]; then
+    awk '/^MemTotal:/ {print $2; exit}' "$file"
+    return
+  fi
+  if [[ "$os" == "Darwin" ]] && command -v sysctl >/dev/null 2>&1; then
+    value="$(sysctl -n hw.memsize 2>/dev/null || true)"
+    [[ "$value" =~ ^[0-9]+$ ]] && printf '%s\n' "$((value / 1024))"
+  fi
+}
+
+doctor_swap_kb() {
+  local file="${RUNNERCTL_DOCTOR_MEMINFO_FILE:-/proc/meminfo}" os="$1" value
+  if [[ "$os" == "Linux" && -r "$file" ]]; then
+    awk '/^SwapTotal:/ {print $2; exit}' "$file"
+    return
+  fi
+  if [[ "$os" == "Darwin" ]] && command -v sysctl >/dev/null 2>&1; then
+    value="$(sysctl -n vm.swapusage 2>/dev/null | sed -nE 's/.*total = ([0-9.]+)([MG]).*/\1 \2/p' || true)"
+    if [[ -n "$value" ]]; then
+      awk '{ if ($2 == "G") printf "%.0f\n", $1 * 1024 * 1024; else printf "%.0f\n", $1 * 1024 }' <<< "$value"
+    fi
+  fi
+}
+
+doctor_cpu_count() {
+  local value
+  value="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+    return
+  fi
+  value="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+  [[ "$value" =~ ^[0-9]+$ ]] && printf '%s' "$value"
+}
+
+doctor_disk_stats() {
+  local root="${RUNNERCTL_DOCTOR_ROOT_PATH:-/}"
+  df -Pk "$root" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $2, $4, $5; exit}'
+}
+
+doctor_active_account() {
+  command -v gh >/dev/null 2>&1 || return 0
+  gh auth status --active --hostname "$GITHUB_HOST" --json hosts \
+    --jq ".hosts[\"$GITHUB_HOST\"][] | select(.active == true) | .login" 2>/dev/null | head -n 1 || true
+}
+
+doctor_collect() {
+  DOCTOR_OS="$(uname -s)"
+  DOCTOR_ARCH="$(uname -m)"
+  DOCTOR_ID="$(doctor_os_value ID)"
+  DOCTOR_NAME="$(doctor_os_value NAME)"
+  DOCTOR_VERSION_ID="$(doctor_os_value VERSION_ID)"
+  DOCTOR_PRETTY="$(doctor_os_value PRETTY_NAME)"
+  DOCTOR_ID_LIKE="$(doctor_os_value ID_LIKE)"
+  IFS='|' read -r DOCTOR_COMPAT DOCTOR_COMPAT_REASON <<< "$(doctor_os_compatibility "$DOCTOR_OS" "$DOCTOR_ID" "$DOCTOR_VERSION_ID")"
+
+  DOCTOR_GH=false; command -v gh >/dev/null 2>&1 && DOCTOR_GH=true
+  DOCTOR_CURL=false; command -v curl >/dev/null 2>&1 && DOCTOR_CURL=true
+  DOCTOR_TAR=false; command -v tar >/dev/null 2>&1 && DOCTOR_TAR=true
+  DOCTOR_GIT=false; command -v git >/dev/null 2>&1 && DOCTOR_GIT=true
+  DOCTOR_DOCKER=false; command -v docker >/dev/null 2>&1 && DOCTOR_DOCKER=true
+  DOCTOR_DOCKER_DAEMON=false
+  if [[ "$DOCTOR_DOCKER" == true ]] && docker info >/dev/null 2>&1; then DOCTOR_DOCKER_DAEMON=true; fi
+
+  DOCTOR_CPU="$(doctor_cpu_count)"
+  DOCTOR_MEM_KB="$(doctor_memory_kb "$DOCTOR_OS")"
+  DOCTOR_SWAP_KB="$(doctor_swap_kb "$DOCTOR_OS")"
+  DOCTOR_MEM_KB="${DOCTOR_MEM_KB:-0}"
+  DOCTOR_SWAP_KB="${DOCTOR_SWAP_KB:-0}"
+  DOCTOR_MEM_MIB=$((DOCTOR_MEM_KB / 1024))
+  DOCTOR_SWAP_MIB=$((DOCTOR_SWAP_KB / 1024))
+
+  DOCTOR_DISK_TOTAL_KB=0; DOCTOR_DISK_AVAIL_KB=0; DOCTOR_DISK_USED_PCT=0
+  read -r DOCTOR_DISK_TOTAL_KB DOCTOR_DISK_AVAIL_KB DOCTOR_DISK_USED_PCT <<< "$(doctor_disk_stats)"
+  DOCTOR_DISK_TOTAL_KB="${DOCTOR_DISK_TOTAL_KB:-0}"
+  DOCTOR_DISK_AVAIL_KB="${DOCTOR_DISK_AVAIL_KB:-0}"
+  DOCTOR_DISK_USED_PCT="${DOCTOR_DISK_USED_PCT:-0}"
+
+  DOCTOR_ACTIVE="$(doctor_active_account)"
+  DOCTOR_CONTAINER_READY=false
+  if [[ "$DOCTOR_OS" == "Linux" && "$DOCTOR_DOCKER_DAEMON" == true ]]; then DOCTOR_CONTAINER_READY=true; fi
+
+  DOCTOR_STATUS="ok"
+  DOCTOR_MESSAGES=()
+  if [[ "$DOCTOR_COMPAT" == "unsupported" ]]; then
+    DOCTOR_STATUS="fail"
+    DOCTOR_MESSAGES+=("Unsupported runner OS: ${DOCTOR_PRETTY:-$DOCTOR_OS}. ${DOCTOR_COMPAT_REASON}.")
+  elif [[ "$DOCTOR_COMPAT" == "unknown" ]]; then
+    DOCTOR_STATUS="warning"
+    DOCTOR_MESSAGES+=("Runner OS compatibility is unknown: ${DOCTOR_PRETTY:-$DOCTOR_OS}. ${DOCTOR_COMPAT_REASON}.")
+  fi
+
+  local dep
+  for dep in gh curl tar git; do
+    local flag_var="DOCTOR_${dep^^}"
+    if [[ "${!flag_var}" != true ]]; then
+      DOCTOR_STATUS="fail"
+      DOCTOR_MESSAGES+=("Required command missing: $dep.")
+    fi
+  done
+
+  if (( DOCTOR_MEM_KB > 0 && DOCTOR_MEM_KB < 1048576 )); then
+    [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
+    DOCTOR_MESSAGES+=("Very low memory (${DOCTOR_MEM_MIB} MiB); general Node/Docker CI is not recommended. Use at least 2 GiB, preferably 4 GiB+.")
+  elif (( DOCTOR_MEM_KB > 0 && DOCTOR_MEM_KB < 2097152 )); then
+    [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
+    DOCTOR_MESSAGES+=("Low memory (${DOCTOR_MEM_MIB} MiB); Node/Docker builds may be unstable. 4 GiB+ is recommended.")
+  fi
+
+  if (( DOCTOR_MEM_KB > 0 && DOCTOR_MEM_KB < 2097152 && DOCTOR_SWAP_KB == 0 )); then
+    [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
+    DOCTOR_MESSAGES+=("No swap detected on a low-memory host.")
+  fi
+
+  if (( DOCTOR_DISK_AVAIL_KB > 0 && DOCTOR_DISK_AVAIL_KB < 2097152 )); then
+    [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
+    DOCTOR_MESSAGES+=("Less than 2 GiB is available on the runner root filesystem.")
+  elif (( DOCTOR_DISK_AVAIL_KB > 0 && DOCTOR_DISK_AVAIL_KB < 5242880 )); then
+    [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
+    DOCTOR_MESSAGES+=("Less than 5 GiB is available on the runner root filesystem.")
+  fi
+
+  if [[ "$DOCTOR_DOCKER" == true && "$DOCTOR_DOCKER_DAEMON" != true ]]; then
+    [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
+    DOCTOR_MESSAGES+=("Docker CLI is installed but the daemon is not reachable by this user.")
+  fi
+}
+
+doctor_print_messages_json() {
+  local first=true message
+  printf '['
+  for message in "${DOCTOR_MESSAGES[@]}"; do
+    if [[ "$first" != true ]]; then printf ','; fi
+    doctor_json_quote "$message"
+    first=false
+  done
+  printf ']'
+}
+
+cmd_doctor_json() {
+  doctor_collect
+  printf '{"version":'
+  doctor_json_quote "$(run_base version)"
+  printf ',"home":'; doctor_json_quote "$RUNNERCTL_HOME"
+  printf ',"config_home":'; doctor_json_quote "${RUNNERCTL_CONFIG_HOME:-$HOME/.config/runnerctl}"
+  printf ',"platform":{"os":'; doctor_json_quote "$DOCTOR_OS"
+  printf ',"arch":'; doctor_json_quote "$DOCTOR_ARCH"
+  printf ',"distro_id":'; doctor_json_quote "$DOCTOR_ID"
+  printf ',"distro_name":'; doctor_json_quote "$DOCTOR_NAME"
+  printf ',"distro_version":'; doctor_json_quote "$DOCTOR_VERSION_ID"
+  printf ',"pretty_name":'; doctor_json_quote "$DOCTOR_PRETTY"
+  printf ',"id_like":'; doctor_json_quote "$DOCTOR_ID_LIKE"
+  printf ',"compatibility":'; doctor_json_quote "$DOCTOR_COMPAT"
+  printf ',"compatibility_reason":'; doctor_json_quote "$DOCTOR_COMPAT_REASON"
+  printf '}'
+  printf ',"dependencies":{"gh":%s,"curl":%s,"tar":%s,"git":%s,"docker":%s,"docker_daemon":%s}' \
+    "$DOCTOR_GH" "$DOCTOR_CURL" "$DOCTOR_TAR" "$DOCTOR_GIT" "$DOCTOR_DOCKER" "$DOCTOR_DOCKER_DAEMON"
+  printf ',"resources":{"cpu_count":%s,"memory_kb":%s,"memory_mib":%s,"swap_kb":%s,"swap_mib":%s,"disk_root_total_kb":%s,"disk_root_available_kb":%s,"disk_root_used_percent":%s}' \
+    "${DOCTOR_CPU:-0}" "$DOCTOR_MEM_KB" "$DOCTOR_MEM_MIB" "$DOCTOR_SWAP_KB" "$DOCTOR_SWAP_MIB" "$DOCTOR_DISK_TOTAL_KB" "$DOCTOR_DISK_AVAIL_KB" "$DOCTOR_DISK_USED_PCT"
+  printf ',"capabilities":{"container_actions":%s}' "$DOCTOR_CONTAINER_READY"
+  printf ',"github":{"host":'; doctor_json_quote "$GITHUB_HOST"
+  printf ',"active_account":'; doctor_json_quote "$DOCTOR_ACTIVE"; printf '}'
+  printf ',"assessment":{"status":'; doctor_json_quote "$DOCTOR_STATUS"
+  printf ',"messages":'; doctor_print_messages_json; printf '}}\n'
+}
+
+cmd_doctor_text() {
+  doctor_collect
+  printf 'runnerctl doctor\n'
+  printf 'version: %s\n' "$(run_base version)"
+  printf 'home: %s\n' "$RUNNERCTL_HOME"
+  printf 'config home: %s\n' "${RUNNERCTL_CONFIG_HOME:-$HOME/.config/runnerctl}"
+  printf 'platform: %s (%s)\n' "$DOCTOR_OS" "$DOCTOR_ARCH"
+  if [[ -n "$DOCTOR_PRETTY" ]]; then printf 'os: %s\n' "$DOCTOR_PRETTY"; fi
+  printf 'os compatibility: %s (%s)\n' "$(printf '%s' "$DOCTOR_COMPAT" | tr '[:lower:]' '[:upper:]')" "$DOCTOR_COMPAT_REASON"
+
+  local name flag path
+  for name in gh curl tar git; do
+    flag="DOCTOR_${name^^}"
+    if [[ "${!flag}" == true ]]; then
+      path="$(command -v "$name")"
+      printf '%-8s OK (%s)\n' "$name" "$path"
+    else
+      printf '%-8s MISSING\n' "$name"
+    fi
+  done
+  if [[ "$DOCTOR_DOCKER" == true ]]; then
+    if [[ "$DOCTOR_DOCKER_DAEMON" == true ]]; then
+      printf '%-8s OK (%s; daemon reachable)\n' docker "$(command -v docker)"
+    else
+      printf '%-8s WARNING (%s; daemon unreachable)\n' docker "$(command -v docker)"
+    fi
+  else
+    printf '%-8s MISSING (optional; required for container actions)\n' docker
+  fi
+
+  printf 'cpu: %s\n' "${DOCTOR_CPU:-unknown}"
+  if (( DOCTOR_MEM_KB > 0 )); then printf 'memory: %s MiB\n' "$DOCTOR_MEM_MIB"; else printf 'memory: unknown\n'; fi
+  if (( DOCTOR_SWAP_KB > 0 )); then printf 'swap: %s MiB\n' "$DOCTOR_SWAP_MIB"; else printf 'swap: 0 MiB\n'; fi
+  if (( DOCTOR_DISK_TOTAL_KB > 0 )); then
+    printf 'disk /: %s MiB available of %s MiB (%s%% used)\n' "$((DOCTOR_DISK_AVAIL_KB / 1024))" "$((DOCTOR_DISK_TOTAL_KB / 1024))" "$DOCTOR_DISK_USED_PCT"
+  else
+    printf 'disk /: unknown\n'
+  fi
+  printf 'container actions: %s\n' "$([[ "$DOCTOR_CONTAINER_READY" == true ]] && printf 'READY' || printf 'NOT READY')"
+  if [[ -n "$DOCTOR_ACTIVE" ]]; then printf 'gh active account: %s\n' "$DOCTOR_ACTIVE"; fi
+  printf 'result: %s\n' "$(printf '%s' "$DOCTOR_STATUS" | tr '[:lower:]' '[:upper:]')"
+
+  local message
+  for message in "${DOCTOR_MESSAGES[@]}"; do
+    printf 'warning: %s\n' "$message"
+  done
+}
+
 main() {
   local cmd="${1:-help}" helper output
 
@@ -209,6 +502,18 @@ main() {
         return
       fi
       exec bash "$helper" "$@"
+      ;;
+    doctor)
+      if [[ "${2:-}" == "--help" || "${2:-}" == "-h" || "${2:-}" == "help" ]]; then
+        output="$(run_base doctor --help)" || return $?
+        safe_print "$output"
+      elif [[ "${2:-}" == "--json" ]]; then
+        [[ $# -eq 2 ]] || { printf 'runnerctl: doctor --json takes no additional arguments\n' >&2; return 2; }
+        cmd_doctor_json
+      else
+        [[ $# -eq 1 ]] || { printf 'runnerctl: doctor takes no arguments other than --json\n' >&2; return 2; }
+        cmd_doctor_text
+      fi
       ;;
     add)
       if [[ " $* " == *" --help "* || " $* " == *" -h "* ]]; then
