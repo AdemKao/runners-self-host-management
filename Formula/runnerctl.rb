@@ -9,53 +9,42 @@ class Runnerctl < Formula
   def install
     libexec.install "runnerctl" => "runnerctl-frontend"
     libexec.install "runnerctl-base" => "runnerctl-base"
+    libexec.install "runnerctl-base-legacy" => "runnerctl-base-legacy"
     libexec.install "bin/runnerctl" => "runnerctl-core"
+    libexec.install "bin/runnerctl-legacy" => "runnerctl-core-legacy"
     libexec.install "bin/runnerctl-cleanup" => "runnerctl-cleanup"
     libexec.install "bin/runnerctl-host" => "runnerctl-host"
     libexec.install "bin/runnerctl-ci" => "runnerctl-ci"
     libexec.install "bin/runnerctl-hooks" => "runnerctl-hooks"
     libexec.install "bin/runnerctl-queue" => "runnerctl-queue"
+    libexec.install "bin/runnerctl-queue-legacy" => "runnerctl-queue-legacy"
+    libexec.install "bin/runnerctl-scheduler" => "runnerctl-scheduler"
+    libexec.install "bin/runnerctl-scheduler-core" => "runnerctl-scheduler-core"
 
-    chmod 0755, libexec/"runnerctl-frontend"
-    chmod 0755, libexec/"runnerctl-base"
-    chmod 0755, libexec/"runnerctl-core"
-    chmod 0755, libexec/"runnerctl-cleanup"
-    chmod 0755, libexec/"runnerctl-host"
-    chmod 0755, libexec/"runnerctl-ci"
-    chmod 0755, libexec/"runnerctl-hooks"
-    chmod 0755, libexec/"runnerctl-queue"
+    %w[runnerctl-frontend runnerctl-base runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core].each do |name|
+      chmod 0755, libexec/name
+    end
 
-    # runnerctl-base is installed directly in libexec and resolves optional
-    # helpers from its source-compatible bin/ sibling first. Preserve the
-    # flattened paths for compatibility and expose bin/ symlinks for lookup.
     (libexec/"bin").mkpath
-    (libexec/"bin").install_symlink libexec/"runnerctl-host"
-    (libexec/"bin").install_symlink libexec/"runnerctl-ci"
-    (libexec/"bin").install_symlink libexec/"runnerctl-hooks"
-    (libexec/"bin").install_symlink libexec/"runnerctl-queue"
+    %w[runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core].each do |name|
+      (libexec/"bin").install_symlink libexec/name
+    end
 
     (bin/"runnerctl").write_env_script(
       libexec/"runnerctl-frontend",
       RUNNERCTL_CORE: libexec/"runnerctl-core"
     )
 
-    generate_completions_from_executable(
-      bin/"runnerctl",
-      "completion"
-    )
+    generate_completions_from_executable(bin/"runnerctl", "completion")
   end
 
   test do
-    assert_equal "0.4.3", shell_output("#{bin}/runnerctl version").strip
+    assert_equal "0.5.0", shell_output("#{bin}/runnerctl version").strip
     assert_match "AI AGENT", shell_output("#{bin}/runnerctl --help")
-    assert_match "workspace cleanup", shell_output("#{bin}/runnerctl cleanup --help")
-    assert_match "host prerequisites", shell_output("#{bin}/runnerctl host --help")
-    assert_match "GitHub Actions workflows", shell_output("#{bin}/runnerctl ci --help")
-    assert_match "safe job concurrency", shell_output("#{bin}/runnerctl capacity --help")
-    assert_match "host-wide execution gate", shell_output("#{bin}/runnerctl queue --help")
-    assert_match '"memory_mib":', shell_output("#{bin}/runnerctl capacity --json")
-    assert_match '"enabled":false', shell_output("#{bin}/runnerctl queue status --json")
-    assert_match '"agent_ready": true', shell_output("#{bin}/runnerctl agent --json")
-    assert_match '"current_version":"0.4.3"', shell_output("RUNNERCTL_LATEST_VERSION=0.4.3 RUNNERCTL_INSTALL_METHOD=homebrew #{bin}/runnerctl upgrade --check --json")
+    assert_match "GitHub-native scheduling", shell_output("#{bin}/runnerctl --help")
+    assert_match "Legacy host-side admission gate", shell_output("#{bin}/runnerctl queue --help")
+    assert_match "GitHub-native scheduler", shell_output("#{bin}/runnerctl scheduler --help")
+    assert_match '"enabled":false', shell_output("#{bin}/runnerctl scheduler status --json")
+    assert_match '"current_version":"0.5.0"', shell_output("RUNNERCTL_LATEST_VERSION=0.5.0 RUNNERCTL_INSTALL_METHOD=homebrew #{bin}/runnerctl upgrade --check --json")
   end
 end
