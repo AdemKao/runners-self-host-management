@@ -1,0 +1,16 @@
+name: Release fixture
+
+on:
+  push:
+
+jobs:
+  release:
+    runs-on: self-hosted
+    services:
+      redis:
+        image: redis:7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anothrNick/github-tag-action@1.67.0
+      - name: Linux package example
+        run: sudo apt-get update
