@@ -185,7 +185,8 @@ active_count(){ find "$SLOTS_DIR" -maxdepth 1 -type f -name '*.slot' 2>/dev/null
 waiting_count(){ find "$WAITING_DIR" -maxdepth 1 -type f -name '*.wait' 2>/dev/null | wc -l | tr -d ' '; }
 
 write_started_hook(){
-  local runner="$1" target="$HOOKS_DIR/$runner/queue-start.sh"
+  local runner="$1" target
+  target="$HOOKS_DIR/$runner/queue-start.sh"
   mkdir -p "$(dirname "$target")"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
@@ -246,7 +247,8 @@ EOF
 }
 
 write_completed_hook(){
-  local runner="$1" target="$HOOKS_DIR/$runner/queue-completed.sh"
+  local runner="$1" target
+  target="$HOOKS_DIR/$runner/queue-completed.sh"
   mkdir -p "$(dirname "$target")"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
@@ -280,7 +282,8 @@ restart_runner(){
 }
 
 attach_runner(){
-  local runner="$1" d="$RUNNERS_DIR/$runner" hooks started completed
+  local runner="$1" d hooks started completed
+  d="$RUNNERS_DIR/$runner"
   [[ -f "$d/.runnerctl-meta" ]] || die "Unknown runner: $runner"
   hooks="$(find_hooks_helper)"; started="$(write_started_hook "$runner")"; completed="$(write_completed_hook "$runner")"
   RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" register "$runner" started queue "$started" >/dev/null
@@ -295,7 +298,8 @@ attach_all(){
 }
 
 detach_runner(){
-  local runner="$1" d="$RUNNERS_DIR/$runner" hooks
+  local runner="$1" d hooks
+  d="$RUNNERS_DIR/$runner"
   [[ -f "$d/.runnerctl-meta" ]] || return 0
   hooks="$(find_hooks_helper)"
   RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" unregister "$runner" started queue >/dev/null || true
