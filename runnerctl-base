@@ -1,1212 +1,157 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.3"
+VERSION="0.5.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
-RUNNERS_DIR="$RUNNERCTL_HOME/runners"
-RUNNERCTL_CONFIG_HOME="${RUNNERCTL_CONFIG_HOME:-$HOME/.config/runnerctl}"
-ACCOUNT_MAP_FILE="$RUNNERCTL_CONFIG_HOME/accounts.tsv"
-GITHUB_HOST="${RUNNERCTL_GITHUB_HOST:-${GH_HOST:-github.com}}"
 RUNNERCTL_REPO="${RUNNERCTL_REPO:-AdemKao/runners-self-host-management}"
 
-find_core() {
-  local candidates=(
-    "${RUNNERCTL_CORE:-}"
-    "$SCRIPT_DIR/bin/runnerctl"
-    "$SCRIPT_DIR/../libexec/runnerctl-core"
-    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-core"
-  )
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    [[ -n "$candidate" && -f "$candidate" ]] || continue
-    printf '%s' "$candidate"
-    return 0
-  done
-  printf 'runnerctl: core executable not found. Reinstall runnerctl.\n' >&2
-  exit 1
+find_legacy(){
+  local candidates=("${RUNNERCTL_BASE_LEGACY:-}" "$SCRIPT_DIR/runnerctl-base-legacy" "$SCRIPT_DIR/../libexec/runnerctl-base-legacy" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-base-legacy") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  printf 'runnerctl: legacy frontend base not found. Reinstall runnerctl.\n' >&2; exit 1
 }
-
-find_host_helper() {
-  local candidates=(
-    "${RUNNERCTL_HOST_HELPER:-}"
-    "$SCRIPT_DIR/bin/runnerctl-host"
-    "$SCRIPT_DIR/../libexec/runnerctl-host"
-    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-host"
-  )
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    [[ -n "$candidate" && -f "$candidate" ]] || continue
-    printf '%s' "$candidate"
-    return 0
-  done
-  printf 'runnerctl: host helper not found. Reinstall runnerctl.\n' >&2
-  exit 1
+find_scheduler(){
+  local candidates=("${RUNNERCTL_SCHEDULER_HELPER:-}" "$SCRIPT_DIR/bin/runnerctl-scheduler" "$SCRIPT_DIR/runnerctl-scheduler" "$SCRIPT_DIR/../libexec/runnerctl-scheduler" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-scheduler") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  printf 'runnerctl: scheduler helper not found. Reinstall runnerctl.\n' >&2; exit 1
 }
-
-find_ci_helper() {
-  local candidates=(
-    "${RUNNERCTL_CI_HELPER:-}"
-    "$SCRIPT_DIR/bin/runnerctl-ci"
-    "$SCRIPT_DIR/../libexec/runnerctl-ci"
-    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-ci"
-  )
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    [[ -n "$candidate" && -f "$candidate" ]] || continue
-    printf '%s' "$candidate"
-    return 0
-  done
-  printf 'runnerctl: CI compatibility helper not found. Reinstall runnerctl.\n' >&2
-  exit 1
+find_queue(){
+  local candidates=("${RUNNERCTL_QUEUE_HELPER:-}" "$SCRIPT_DIR/bin/runnerctl-queue" "$SCRIPT_DIR/runnerctl-queue" "$SCRIPT_DIR/../libexec/runnerctl-queue" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-queue") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  return 1
 }
+legacy(){ bash "$(find_legacy)" "$@"; }
+append_scheduler_help(){ cat <<'EOF'
 
-find_queue_helper() {
-  local candidates=(
-    "${RUNNERCTL_QUEUE_HELPER:-}"
-    "$SCRIPT_DIR/bin/runnerctl-queue"
-    "$SCRIPT_DIR/../libexec/runnerctl-queue"
-    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-queue"
-  )
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    [[ -n "$candidate" && -f "$candidate" ]] || continue
-    printf '%s' "$candidate"
-    return 0
-  done
-  printf 'runnerctl: queue helper not found. Reinstall runnerctl.\n' >&2
-  exit 1
-}
+GitHub-native scheduling:
+  scheduler      Keep scheduled jobs in GitHub's queued state until host
+                 capacity is available by granting a routing label.
 
-usage_error() {
-  printf 'runnerctl: %s\n' "$*" >&2
-  exit 2
-}
+Migration:
+  Add `runnerctl-scheduled` to scheduled jobs:
+    runs-on: [self-hosted, linux, x64, runnerctl-scheduled]
 
-json_quote() {
-  local value="${1:-}"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  value="${value//$'\n'/\\n}"
-  value="${value//$'\r'/\\r}"
-  value="${value//$'\t'/\\t}"
-  printf '"%s"' "$value"
-}
-
-json_csv_array() {
-  local value="${1:-}" first=1 item
-  local -a items=()
-  printf '['
-  IFS=',' read -r -a items <<< "$value"
-  for item in "${items[@]}"; do
-    [[ -n "$item" ]] || continue
-    [[ $first -eq 1 ]] || printf ','
-    json_quote "$item"
-    first=0
-  done
-  printf ']'
-}
-
-meta_get() {
-  local dir="$1" key="$2"
-  awk -F= -v k="$key" '$1 == k {sub(/^[^=]*=/, ""); print; exit}' "$dir/.runnerctl-meta" 2>/dev/null || true
-}
-
-launchd_service_label() {
-  local service="$1"
-  service="${service##*/}"
-  service="${service%.plist}"
-  printf '%s' "$service"
-}
-
-launchd_service_running() {
-  local service="$1" label domain output
-  label="$(launchd_service_label "$service")"
-  [[ -n "$label" ]] || return 1
-  domain="gui/$(id -u)"
-
-  if output="$(launchctl print "$domain/$label" 2>/dev/null)"; then
-    if printf '%s\n' "$output" | grep -Eq '^[[:space:]]*state = running([[:space:]]|$)'; then
-      return 0
-    fi
-    if printf '%s\n' "$output" | grep -Eq '^[[:space:]]*pid = [1-9][0-9]*([[:space:]]|$)'; then
-      return 0
-    fi
-    return 1
-  fi
-
-  launchctl list 2>/dev/null | awk -v label="$label" '$3 == label && $1 ~ /^[0-9]+$/ { found=1 } END { exit(found ? 0 : 1) }'
-}
-
-service_state() {
-  local dir="$1" service=""
-  service="$(cat "$dir/.service" 2>/dev/null || true)"
-  [[ -n "$service" ]] || { printf 'not-installed'; return; }
-  case "$(uname -s)" in
-    Darwin)
-      if launchd_service_running "$service"; then printf 'running'; else printf 'stopped'; fi
-      ;;
-    Linux)
-      if systemctl is-active --quiet "$service" 2>/dev/null; then printf 'running'; else printf 'stopped'; fi
-      ;;
-    *) printf 'unknown' ;;
-  esac
-}
-
-active_account() {
-  command -v gh >/dev/null 2>&1 || return 0
-  gh auth status --active --hostname "$GITHUB_HOST" --json hosts \
-    --jq ".hosts[\"$GITHUB_HOST\"][] | select(.active == true) | .login" 2>/dev/null | head -n 1 || true
-}
-
-root_help() {
-  cat <<'EOF'
-runnerctl - Manage GitHub Actions self-hosted runners
-
-Usage:
-  runnerctl [command]
-
-Runner Management:
-  add            Register one or more self-hosted runners
-  list           List locally managed runners
-  status         Show runner service status
-  logs           Show runner diagnostic logs
-  job-logs       Show workflow worker logs
-
-Lifecycle:
-  start          Start a runner service
-  stop           Stop a runner service
-  restart        Restart a runner service
-  start-all      Start all managed runner services
-  stop-all       Stop all managed runner services
-  remove         Unregister and delete a runner
-
-Authentication:
-  auth           Manage GitHub CLI accounts and repository mappings
-
-Maintenance:
-  upgrade        Check for or install the latest runnerctl release
-  self-update    Alias for upgrade
-  completion     Generate shell completion
-
-Diagnostics & Automation:
-  doctor         Check the local runnerctl environment
-  host           Inspect or bootstrap host prerequisites
-  ci             Check workflow compatibility for self-hosted runners
-  capacity       Estimate safe host concurrency
-  queue          Manage host-wide job execution concurrency
-  agent          Show the AI-agent automation contract
-
-Other:
-  help           Help about any command
-  version        Print runnerctl version
-
-Flags:
-  -h, --help     Show help
-  -v, --version  Print version
-
-AI AGENT:
-  Run `runnerctl agent` for automation safety guidance.
-  Run `runnerctl agent --json` for a machine-readable contract.
-
-Use "runnerctl [command] --help" for more information about a command.
+The v0.4.x `queue` command remains available as a legacy host-side admission
+gate. It is not GitHub-native queueing and waiting there can consume part of a
+job's timeout-minutes budget.
 EOF
 }
-
-command_help() {
-  local command="${1:-}"
-  case "$command" in
-    add)
-      cat <<'EOF'
-Register one or more GitHub Actions self-hosted runners.
-
-Usage:
-  runnerctl add OWNER/REPO [flags]
-
-Flags:
-  --count N              Number of runner instances (default: 1)
-  --labels a,b           Custom labels (default: local)
-  --name-prefix PREFIX   Runner name prefix
-  --account ACCOUNT      GitHub CLI account to use
-  -h, --help             Show help
-
-Side effects:
-  - Downloads the official GitHub Actions runner.
-  - Requests a short-lived registration token from GitHub.
-  - Registers runner instances with the repository.
-  - Creates local runner directories.
-  - Installs and starts launchd/systemd services.
-
-AI AGENT:
-  MUTATING. Run `runnerctl doctor`, `runnerctl auth resolve OWNER/REPO`, and
-  `runnerctl list` first. Prefer an explicit --account or an existing mapping.
-EOF
-      ;;
-    list)
-      cat <<'EOF'
-List locally managed runners.
-
-Usage:
-  runnerctl list [--json]
-
-Flags:
-  --json       Emit stable machine-readable JSON
-  -h, --help   Show help
-
-Side effects:
-  None (read-only).
-
-AI AGENT:
-  Prefer --json for automation.
-EOF
-      ;;
-    status)
-      cat <<'EOF'
-Show runner service status.
-
-Usage:
-  runnerctl status [RUNNER] [--json]
-
-Flags:
-  --json       Emit stable machine-readable JSON
-  -h, --help   Show help
-
-Side effects:
-  None (read-only).
-EOF
-      ;;
-    doctor)
-      cat <<'EOF'
-Check the local runnerctl environment and dependencies.
-
-Usage:
-  runnerctl doctor [--json]
-
-Flags:
-  --json       Emit stable machine-readable JSON
-  -h, --help   Show help
-
-Side effects:
-  None (read-only).
-
-AI AGENT:
-  This should normally be the first runnerctl command an agent executes.
-EOF
-      ;;
-    host)
-      cat <<'EOF'
-Inspect or bootstrap host prerequisites for self-hosted runners.
-
-Usage:
-  runnerctl host inspect [--json]
-  runnerctl host bootstrap [--dry-run] [--json]
-
-Commands:
-  inspect      Read-only OS, package-manager, and dependency inspection
-  bootstrap    Install missing git/gh/curl/tar prerequisites
-
-Safety:
-  - `host bootstrap --dry-run` is read-only.
-  - `host bootstrap` mutates system packages and may invoke sudo.
-  - It does not configure swap, firewall, Docker, credentials, or runner registration.
-  - macOS requires Homebrew to already be installed.
-
-AI AGENT:
-  Prefer `runnerctl host inspect --json` and `runnerctl host bootstrap --dry-run --json`
-  before allowing package mutations.
-EOF
-      ;;
-    ci)
-      cat <<'EOF'
-Check GitHub Actions workflows before moving jobs to self-hosted runners.
-
-Usage:
-  runnerctl ci check OWNER/REPO [--current-host] [--account ACCOUNT] [--json]
-
-Checks:
-  - Docker-based actions (`runs.using: docker`)
-  - `docker://` actions
-  - service containers and job containers
-  - obvious OS-specific commands such as apt-get and brew
-
-Flags:
-  --current-host      Compare requirements against this machine
-  --account ACCOUNT   GitHub CLI account used for private repository/action reads
-  --json              Emit stable machine-readable JSON
-  -h, --help          Show help
-
-Side effects:
-  None (read-only). The scanner reports recommendations and does not rewrite workflows.
-
-AI AGENT:
-  Run this before replacing GitHub-hosted `runs-on` values with self-hosted labels.
-EOF
-      ;;
-    capacity)
-      cat <<'EOF'
-Estimate safe job concurrency from this host's CPU and memory.
-
-Usage:
-  runnerctl capacity [--json]
-
-The estimate is intentionally conservative. Hosts below 2 GiB RAM recommend a
-single lightweight job and zero concurrent Node/Docker-heavy builds.
-
-Side effects:
-  None (read-only).
-EOF
-      ;;
-    queue)
-      cat <<'EOF'
-Manage a host-wide execution gate across all runnerctl-managed runners.
-
-Usage:
-  runnerctl queue status [--json]
-  runnerctl queue enable [--max-concurrency N]
-  runnerctl queue disable
-  runnerctl queue set --max-concurrency N
-  runnerctl queue drain
-  runnerctl queue resume
-
-Behavior:
-  - All repository-specific runner services remain online.
-  - GitHub still assigns jobs to matching runners.
-  - A runnerctl pre-job hook waits for a host-wide slot before workflow steps run.
-  - Completion hooks release the slot.
-  - `drain` blocks new slot acquisition without terminating active jobs.
-
-Side effects:
-  `status` is read-only. Other queue commands mutate local hook/config state and
-  may restart managed runner services so hook environment changes take effect.
-EOF
-      ;;
-    auth)
-      cat <<'EOF'
-Manage GitHub CLI accounts and repository-to-account mappings.
-
-Usage:
-  runnerctl auth [command]
-
-Commands:
-  list                 List authenticated GitHub accounts
-  status               Show GitHub authentication status
-  use ACCOUNT          Change the global active gh account
-  login [...]          Run GitHub CLI login
-  setup-git            Configure Git credential helper through gh
-  doctor               Inspect auth/repository context
-  map PATTERN ACCOUNT  Map OWNER/REPO or OWNER/* to an account
-  unmap PATTERN        Remove a mapping
-  mappings             List mappings
-  resolve OWNER/REPO   Resolve the account runnerctl will use
-
-JSON-capable discovery commands:
-  runnerctl auth list --json
-  runnerctl auth status --json
-  runnerctl auth doctor --json
-  runnerctl auth mappings --json
-  runnerctl auth resolve OWNER/REPO --json
-
-AI AGENT:
-  Prefer mappings or --account over `auth use`; `auth use` changes global gh state.
-EOF
-      ;;
-    "auth map")
-      cat <<'EOF'
-Map a repository or owner wildcard to an authenticated GitHub account.
-
-Usage:
-  runnerctl auth map OWNER/REPO ACCOUNT
-  runnerctl auth map 'OWNER/*' ACCOUNT
-
-Side effects:
-  Writes ~/.config/runnerctl/accounts.tsv (or RUNNERCTL_CONFIG_HOME).
-
-AI AGENT:
-  MUTATING local configuration. Never invent account or repository names.
-EOF
-      ;;
-    "auth resolve")
-      cat <<'EOF'
-Resolve which GitHub account runnerctl will use for a repository.
-
-Usage:
-  runnerctl auth resolve OWNER/REPO [--json]
-
-Resolution order:
-  1. Command-specific --account (when supported)
-  2. Exact OWNER/REPO mapping
-  3. OWNER/* mapping
-  4. Active GitHub CLI account
-
-Side effects:
-  None (read-only).
-EOF
-      ;;
-    logs)
-      cat <<'EOF'
-Show the latest GitHub Actions runner diagnostic log.
-
-Usage:
-  runnerctl logs RUNNER [--no-follow]
-
-Flags:
-  --no-follow   Print the last 200 lines and exit
-
-AI AGENT:
-  Use --no-follow so unattended automation does not block indefinitely.
-EOF
-      ;;
-    job-logs)
-      cat <<'EOF'
-Show the latest GitHub Actions workflow worker diagnostic log.
-
-Usage:
-  runnerctl job-logs RUNNER [--no-follow]
-
-Flags:
-  --no-follow   Print the last 200 lines and exit
-
-AI AGENT:
-  Use --no-follow so unattended automation does not block indefinitely.
-EOF
-      ;;
-    start|stop|restart)
-      cat <<EOF
-Manage one runner service.
-
-Usage:
-  runnerctl $command RUNNER
-
-Side effects:
-  MUTATING host service state. Linux may invoke sudo.
-
-AI AGENT:
-  Inspect \`runnerctl status RUNNER\` before changing service state.
-EOF
-      ;;
-    start-all|stop-all)
-      cat <<EOF
-Manage every locally configured runner service.
-
-Usage:
-  runnerctl $command
-
-Side effects:
-  MUTATING host service state for multiple runners. Linux may invoke sudo.
-
-AI AGENT:
-  Inspect \`runnerctl list --json\` first because this affects all managed runners.
-EOF
-      ;;
-    remove)
-      cat <<'EOF'
-Unregister a runner from GitHub and delete its local runner directory.
-
-Usage:
-  runnerctl remove RUNNER [--yes] [--account ACCOUNT]
-
-Flags:
-  --yes                Skip the interactive confirmation
-  --account ACCOUNT    Override the GitHub account used for removal
-
-Side effects:
-  DESTRUCTIVE. Stops/uninstalls the service, unregisters the GitHub runner, and
-  removes local runner data.
-
-AI AGENT:
-  Never use --yes unless removal of that exact runner was explicitly requested.
-EOF
-      ;;
-    upgrade|self-update)
-      cat <<'EOF'
-Check for or install the latest runnerctl release.
-
-Usage:
-  runnerctl upgrade
-  runnerctl upgrade --check
-  runnerctl upgrade --check --json
-  runnerctl self-update
-
-Behavior:
-  - Homebrew HEAD: `brew update` then `brew upgrade --fetch-HEAD runnerctl`
-  - Homebrew stable: `brew update` then `brew upgrade runnerctl`
-  - pnpm: installs the latest tagged GitHub release globally
-  - npm: installs the latest tagged GitHub release globally
-  - shell installer: downloads the latest release, verifies SHA-256, and replaces
-    the installed frontend/core using install.sh
-
-Flags:
-  --check      Only check whether an update is available
-  --json       Machine-readable output; requires --check
-  -h, --help   Show help
-
-Environment overrides (primarily for testing/advanced automation):
-  RUNNERCTL_LATEST_VERSION
-  RUNNERCTL_INSTALL_METHOD
-  RUNNERCTL_INSTALL_PREFIX
-
-Side effects:
-  `--check` is read-only. Without `--check`, this command mutates the installed CLI.
-
-AI AGENT:
-  Prefer `runnerctl upgrade --check --json` before upgrading.
-EOF
-      ;;
-    completion)
-      cat <<'EOF'
-Generate shell completion for runnerctl.
-
-Usage:
-  runnerctl completion bash
-  runnerctl completion zsh
-  runnerctl completion fish
-
-Side effects:
-  None. Output is written to stdout.
-EOF
-      ;;
-    agent|ai-agent)
-      agent_help
-      ;;
-    version)
-      cat <<'EOF'
-Print runnerctl version.
-
-Usage:
-  runnerctl version
-  runnerctl --version
-EOF
-      ;;
-    "") root_help ;;
-    *) usage_error "unknown help topic: $command" ;;
-  esac
-}
-
-agent_help() {
-  cat <<'EOF'
-AI AGENT
-========
-runnerctl exposes an automation contract for coding agents and CI tooling.
-
-Recommended discovery sequence:
-  1. runnerctl doctor --json
-  2. runnerctl host inspect --json
-  3. runnerctl capacity --json
-  4. runnerctl queue status --json
-  5. runnerctl auth list --json
-  6. runnerctl auth mappings --json
-  7. runnerctl list --json
-  8. runnerctl upgrade --check --json
-  9. runnerctl auth resolve OWNER/REPO --json
-  10. runnerctl ci check OWNER/REPO --current-host --json
-  11. runnerctl COMMAND --help before a mutation
-
-Read-only / discovery:
-  doctor, host inspect, host bootstrap --dry-run, ci check, capacity, queue status
-  list, status, auth list, auth status, auth doctor, auth mappings, auth resolve
-  upgrade --check, logs --no-follow, job-logs --no-follow, version, agent, completion
-
-Mutating:
-  host bootstrap
-  queue enable, queue disable, queue set, queue drain, queue resume
-  auth use, auth login, auth setup-git, auth map, auth unmap
-  add, start, stop, restart, start-all, stop-all
-  upgrade, self-update
-
-Destructive:
-  remove
-
-Agent rules:
-  - Perform read-only discovery before mutation.
-  - Never invent repository, account, runner, or label identifiers.
-  - Prefer --account or repository mappings over changing global gh state.
-  - Run CI compatibility checks before moving workflows onto self-hosted runners.
-  - Inspect capacity before increasing host queue concurrency.
-  - Draining the queue must not terminate running jobs.
-  - Use `runnerctl upgrade --check --json` before upgrading when practical.
-  - Use --no-follow when reading logs in unattended automation.
-  - Never use `remove --yes` without explicit intent for that exact runner.
-  - Never print, persist, or commit registration/removal tokens.
-  - Treat self-hosted workflows as code execution on this host.
-  - Do not bypass sudo or interactive privilege prompts.
-  - Treat any non-zero exit code as failure.
-
-Machine-readable contract:
-  runnerctl agent --json
+append_scheduler_agent(){ cat <<'EOF'
+
+GitHub-native scheduler:
+  scheduler status       read-only scheduler and queued-demand inspection
+  scheduler enable       enables label-gated GitHub-native scheduling
+  scheduler disable      disables scheduling and revokes scheduler labels
+  scheduler tick         one-shot reconciliation
+  scheduler drain        stops granting new capacity; running jobs continue
+  scheduler resume       resumes capacity grants
+
+Scheduled workflows MUST request the configured routing label. Jobs without the
+label bypass the scheduler. Prefer scheduler over the legacy queue gate when
+GitHub queued/in_progress semantics and timeout-minutes accuracy matter.
 EOF
 }
-
-agent_json() {
-  cat <<EOF
-{
-  "schema_version": 1,
-  "cli": "runnerctl",
-  "version": "$VERSION",
-  "agent_ready": true,
-  "platforms": ["macOS", "Linux"],
-  "discovery_sequence": [
-    "runnerctl doctor --json",
-    "runnerctl host inspect --json",
-    "runnerctl capacity --json",
-    "runnerctl queue status --json",
-    "runnerctl auth list --json",
-    "runnerctl auth mappings --json",
-    "runnerctl list --json",
-    "runnerctl upgrade --check --json",
-    "runnerctl auth resolve OWNER/REPO --json",
-    "runnerctl ci check OWNER/REPO --current-host --json"
-  ],
-  "commands": {
-    "doctor": {"effect": "read-only", "json": true},
-    "host inspect": {"effect": "read-only", "json": true},
-    "host bootstrap --dry-run": {"effect": "read-only", "json": true},
-    "host bootstrap": {"effect": "mutating-system-packages", "json": true},
-    "ci check": {"effect": "read-only-network", "json": true},
-    "capacity": {"effect": "read-only", "json": true},
-    "queue status": {"effect": "read-only", "json": true},
-    "queue enable": {"effect": "mutating-local-config-and-service"},
-    "queue disable": {"effect": "mutating-local-config-and-service"},
-    "queue set": {"effect": "mutating-local-config"},
-    "queue drain": {"effect": "mutating-local-config"},
-    "queue resume": {"effect": "mutating-local-config"},
-    "list": {"effect": "read-only", "json": true},
-    "status": {"effect": "read-only", "json": true},
-    "auth list": {"effect": "read-only", "json": true},
-    "auth status": {"effect": "read-only", "json": true},
-    "auth doctor": {"effect": "read-only", "json": true},
-    "auth mappings": {"effect": "read-only", "json": true},
-    "auth resolve": {"effect": "read-only", "json": true},
-    "upgrade --check": {"effect": "read-only-network", "json": true},
-    "upgrade": {"effect": "mutating-installation"},
-    "self-update": {"effect": "mutating-installation", "alias_for": "upgrade"},
-    "logs": {"effect": "read-only", "non_blocking_flag": "--no-follow"},
-    "job-logs": {"effect": "read-only", "non_blocking_flag": "--no-follow"},
-    "auth use": {"effect": "mutating-global"},
-    "auth login": {"effect": "mutating-auth"},
-    "auth setup-git": {"effect": "mutating-global"},
-    "auth map": {"effect": "mutating-local-config"},
-    "auth unmap": {"effect": "mutating-local-config"},
-    "add": {"effect": "mutating-local-and-github"},
-    "start": {"effect": "mutating-service"},
-    "stop": {"effect": "mutating-service"},
-    "restart": {"effect": "mutating-service"},
-    "start-all": {"effect": "mutating-service-bulk"},
-    "stop-all": {"effect": "mutating-service-bulk"},
-    "remove": {"effect": "destructive", "confirmation_flag": "--yes"}
-  },
-  "exit_codes": {"0": "success", "1": "operation failed", "2": "invalid frontend usage"},
-  "rules": [
-    "Perform read-only discovery before mutation",
-    "Never invent repository, account, runner, or label identifiers",
-    "Prefer --account or repository mappings over changing global gh state",
-    "Run CI compatibility checks before moving workflows onto self-hosted runners",
-    "Inspect host capacity before increasing queue concurrency",
-    "Do not terminate active jobs when draining or lowering queue concurrency",
-    "Check upgrade status before upgrading when practical",
-    "Use --no-follow for logs in unattended automation",
-    "Require explicit intent before remove --yes",
-    "Never print, persist, or commit GitHub registration/removal tokens",
-    "Do not bypass sudo or interactive privilege prompts",
-    "Treat non-zero exit codes as failure"
-  ]
-}
-EOF
-}
-
-cmd_doctor_json() {
-  local os arch active gh_ok=false curl_ok=false tar_ok=false
-  os="$(uname -s)"; arch="$(uname -m)"; active="$(active_account)"
-  command -v gh >/dev/null 2>&1 && gh_ok=true
-  command -v curl >/dev/null 2>&1 && curl_ok=true
-  command -v tar >/dev/null 2>&1 && tar_ok=true
-  printf '{"version":'; json_quote "$VERSION"
-  printf ',"home":'; json_quote "$RUNNERCTL_HOME"
-  printf ',"config_home":'; json_quote "$RUNNERCTL_CONFIG_HOME"
-  printf ',"platform":{"os":'; json_quote "$os"; printf ',"arch":'; json_quote "$arch"; printf '}'
-  printf ',"dependencies":{"gh":%s,"curl":%s,"tar":%s}' "$gh_ok" "$curl_ok" "$tar_ok"
-  printf ',"github":{"host":'; json_quote "$GITHUB_HOST"; printf ',"active_account":'; json_quote "$active"; printf '}}\n'
-}
-
-cmd_list_json() {
-  local dir name repo account labels status first=1
-  mkdir -p "$RUNNERS_DIR"
-  printf '{"runners":['
-  shopt -s nullglob
-  for dir in "$RUNNERS_DIR"/*; do
-    [[ -f "$dir/.runnerctl-meta" ]] || continue
-    name="$(meta_get "$dir" name)"; repo="$(meta_get "$dir" repo)"
-    account="$(meta_get "$dir" account)"; labels="$(meta_get "$dir" labels)"
-    status="$(service_state "$dir")"
-    [[ $first -eq 1 ]] || printf ','
-    printf '{"name":'; json_quote "$name"
-    printf ',"repository":'; json_quote "$repo"
-    printf ',"account":'; json_quote "$account"
-    printf ',"status":'; json_quote "$status"
-    printf ',"labels":'; json_csv_array "$labels"
-    printf '}'
-    first=0
-  done
-  printf ']}\n'
-}
-
-cmd_status_json() {
-  local name="${1:-}" dir repo account labels status
-  [[ -n "$name" ]] || usage_error "status --json requires RUNNER"
-  dir="$RUNNERS_DIR/$name"
-  [[ -f "$dir/.runnerctl-meta" ]] || { printf 'runnerctl: unknown runner: %s\n' "$name" >&2; exit 1; }
-  repo="$(meta_get "$dir" repo)"; account="$(meta_get "$dir" account)"
-  labels="$(meta_get "$dir" labels)"; status="$(service_state "$dir")"
-  printf '{"name":'; json_quote "$name"
-  printf ',"repository":'; json_quote "$repo"
-  printf ',"account":'; json_quote "$account"
-  printf ',"status":'; json_quote "$status"
-  printf ',"labels":'; json_csv_array "$labels"
-  printf '}\n'
-}
-
-cmd_auth_accounts_json() {
-  command -v gh >/dev/null 2>&1 || { printf '{"host":'; json_quote "$GITHUB_HOST"; printf ',"accounts":[]}\n'; return; }
-  local accounts
-  accounts="$(gh auth status --hostname "$GITHUB_HOST" --json hosts --jq ".hosts[\"$GITHUB_HOST\"] // [] | map({login: .login, active: (.active // false), state: (.state // \"unknown\")})" 2>/dev/null || printf '[]')"
-  printf '{"host":'; json_quote "$GITHUB_HOST"; printf ',"accounts":%s}\n' "$accounts"
-}
-
-cmd_auth_mappings_json() {
-  local first=1 pattern account
-  printf '{"mappings":['
-  if [[ -f "$ACCOUNT_MAP_FILE" ]]; then
-    while IFS=$'\t' read -r pattern account; do
-      [[ -n "$pattern" && -n "$account" ]] || continue
-      [[ $first -eq 1 ]] || printf ','
-      printf '{"pattern":'; json_quote "$pattern"; printf ',"account":'; json_quote "$account"; printf '}'
-      first=0
-    done < "$ACCOUNT_MAP_FILE"
-  fi
-  printf ']}\n'
-}
-
-cmd_auth_resolve_json() {
-  local repo="${1:-}" core account
-  [[ "$repo" =~ ^[^/]+/[^/]+$ ]] || usage_error "auth resolve requires OWNER/REPO"
-  core="$(find_core)"
-  account="$(bash "$core" auth resolve "$repo")" || exit $?
-  printf '{"repository":'; json_quote "$repo"; printf ',"account":'; json_quote "$account"; printf '}\n'
-}
-
-cmd_auth_doctor_json() {
-  local active protocol remote="" repo="" resolved=""
-  active="$(active_account)"
-  protocol="$(gh config get git_protocol --host "$GITHUB_HOST" 2>/dev/null || true)"
-  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    remote="$(git remote get-url origin 2>/dev/null || true)"
-    case "$remote" in
-      https://"$GITHUB_HOST"/*) repo="${remote#https://$GITHUB_HOST/}" ;;
-      git@"$GITHUB_HOST":*) repo="${remote#git@$GITHUB_HOST:}" ;;
-      ssh://git@"$GITHUB_HOST"/*) repo="${remote#ssh://git@$GITHUB_HOST/}" ;;
-    esac
-    repo="${repo%.git}"
-    if [[ "$repo" =~ ^[^/]+/[^/]+$ ]]; then
-      resolved="$(bash "$(find_core)" auth resolve "$repo" 2>/dev/null || true)"
-    fi
-  fi
-  printf '{"host":'; json_quote "$GITHUB_HOST"
-  printf ',"active_account":'; json_quote "$active"
-  printf ',"git_protocol":'; json_quote "$protocol"
-  printf ',"mapping_file":'; json_quote "$ACCOUNT_MAP_FILE"
-  printf ',"origin":'; json_quote "$remote"
-  printf ',"repository":'; json_quote "$repo"
-  printf ',"resolved_account":'; json_quote "$resolved"
-  printf '}\n'
-}
-
-normalize_version() {
-  local version="${1#v}"
-  printf '%s' "${version%%-*}"
-}
-
-version_is_newer() {
-  local lhs rhs lmaj lmin lpat rmaj rmin rpat
-  lhs="$(normalize_version "$1")"
-  rhs="$(normalize_version "$2")"
-  IFS=. read -r lmaj lmin lpat <<< "$lhs"
-  IFS=. read -r rmaj rmin rpat <<< "$rhs"
-  lmaj="${lmaj:-0}"; lmin="${lmin:-0}"; lpat="${lpat:-0}"
-  rmaj="${rmaj:-0}"; rmin="${rmin:-0}"; rpat="${rpat:-0}"
-  (( 10#$lmaj > 10#$rmaj )) && return 0
-  (( 10#$lmaj < 10#$rmaj )) && return 1
-  (( 10#$lmin > 10#$rmin )) && return 0
-  (( 10#$lmin < 10#$rmin )) && return 1
-  (( 10#$lpat > 10#$rpat ))
-}
-
-latest_release_version() {
-  if [[ -n "${RUNNERCTL_LATEST_VERSION:-}" ]]; then
-    normalize_version "$RUNNERCTL_LATEST_VERSION"
-    return
-  fi
-
-  command -v curl >/dev/null 2>&1 || {
-    printf 'runnerctl: curl is required to check for updates\n' >&2
-    return 1
-  }
-
-  local response version
-  response="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
-    "https://api.github.com/repos/$RUNNERCTL_REPO/releases/latest")" || {
-      printf 'runnerctl: failed to query the latest GitHub Release\n' >&2
-      return 1
+agent_json(){
+  legacy agent --json | sed "s/\"version\": \"0\.4\.3\"/\"version\": \"$VERSION\"/" | awk '
+    /"queue resume":/ && !added {
+      print
+      print "    \"scheduler status\": {\"effect\": \"read-only-network\", \"json\": true},"
+      print "    \"scheduler enable\": {\"effect\": \"mutating-github-runner-labels-and-local-controller\"},"
+      print "    \"scheduler disable\": {\"effect\": \"mutating-github-runner-labels-and-local-controller\"},"
+      print "    \"scheduler tick\": {\"effect\": \"mutating-github-runner-labels\", \"json\": true},"
+      print "    \"scheduler drain\": {\"effect\": \"mutating-local-config-and-github-runner-labels\"},"
+      print "    \"scheduler resume\": {\"effect\": \"mutating-local-config-and-github-runner-labels\"},"
+      added=1; next
     }
-  version="$(printf '%s\n' "$response" | sed -n 's/.*"tag_name":[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)"
-  [[ -n "$version" ]] || {
-    printf 'runnerctl: latest GitHub Release did not contain tag_name\n' >&2
-    return 1
-  }
-  normalize_version "$version"
+    { print }
+  '
 }
-
-detect_install_method() {
-  if [[ -n "${RUNNERCTL_INSTALL_METHOD:-}" ]]; then
-    printf '%s' "$RUNNERCTL_INSTALL_METHOD"
-    return
+completion(){
+  local shell="${1:-}"
+  case "$shell" in
+    bash)
+      legacy completion bash | sed 's/capacity queue upgrade/capacity queue scheduler upgrade/'
+      cat <<'EOF'
+_runnerctl_scheduler_complete() {
+  if [[ "${COMP_WORDS[1]:-}" == "scheduler" && ${COMP_CWORD} -eq 2 ]]; then
+    COMPREPLY=( $(compgen -W "status enable disable tick run drain resume" -- "${COMP_WORDS[COMP_CWORD]}") )
+  else
+    _runnerctl_complete "$@"
   fi
-
-  if [[ "${RUNNERCTL_CORE:-}" == *"/Cellar/runnerctl/"* ]]; then
-    printf 'homebrew'
-    return
-  fi
-
-  if command -v brew >/dev/null 2>&1 && brew list --versions runnerctl >/dev/null 2>&1; then
-    printf 'homebrew'
-    return
-  fi
-
-  case "$SCRIPT_DIR" in
-    *"/.pnpm/"*|*"/pnpm/global/"*) printf 'pnpm'; return ;;
-    *"/node_modules/@ademkao/runnerctl"|*"/node_modules/@ademkao/runnerctl/"*) printf 'npm'; return ;;
+}
+complete -F _runnerctl_scheduler_complete runnerctl
+EOF
+      ;;
+    zsh) legacy completion zsh | sed "s/'queue:Manage host-wide job concurrency' 'upgrade:/'queue:Manage host-wide job concurrency' 'scheduler:GitHub-native queued-job scheduler' 'upgrade:/" ;;
+    fish)
+      legacy completion fish | sed "s/capacity queue upgrade/capacity queue scheduler upgrade/"
+      printf "%s\n" "complete -c runnerctl -n '__fish_seen_subcommand_from scheduler' -a 'status enable disable tick run drain resume'"
+      ;;
+    *) legacy completion "$@" ;;
   esac
-
-  if [[ "$(basename "$SCRIPT_DIR")" == "bin" && -f "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-core" ]]; then
-    printf 'shell'
-    return
-  fi
-
+}
+normalize_version(){ local v="${1#v}"; printf '%s' "${v%%-*}"; }
+version_is_newer(){
+  local lhs rhs a b c x y z
+  lhs="$(normalize_version "$1")"; rhs="$(normalize_version "$2")"
+  IFS=. read -r a b c <<<"$lhs"; IFS=. read -r x y z <<<"$rhs"
+  a="${a:-0}"; b="${b:-0}"; c="${c:-0}"; x="${x:-0}"; y="${y:-0}"; z="${z:-0}"
+  ((10#$a > 10#$x)) && return 0; ((10#$a < 10#$x)) && return 1
+  ((10#$b > 10#$y)) && return 0; ((10#$b < 10#$y)) && return 1
+  ((10#$c > 10#$z))
+}
+latest_release_version(){
+  if [[ -n "${RUNNERCTL_LATEST_VERSION:-}" ]]; then normalize_version "$RUNNERCTL_LATEST_VERSION"; return; fi
+  command -v curl >/dev/null 2>&1 || { printf 'runnerctl: curl is required to check for updates\n' >&2; return 1; }
+  local response version
+  response="$(curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$RUNNERCTL_REPO/releases/latest")" || return 1
+  version="$(printf '%s\n' "$response" | sed -n 's/.*"tag_name":[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$version" ]] || return 1; normalize_version "$version"
+}
+detect_install_method(){
+  if [[ -n "${RUNNERCTL_INSTALL_METHOD:-}" ]]; then printf '%s' "$RUNNERCTL_INSTALL_METHOD"; return; fi
+  if [[ "${RUNNERCTL_CORE:-}" == *"/Cellar/runnerctl/"* ]]; then printf 'homebrew'; return; fi
+  if command -v brew >/dev/null 2>&1 && brew list --versions runnerctl >/dev/null 2>&1; then printf 'homebrew'; return; fi
+  case "$SCRIPT_DIR" in *"/.pnpm/"*|*"/pnpm/global/"*) printf 'pnpm'; return ;; *"/node_modules/@ademkao/runnerctl"|*"/node_modules/@ademkao/runnerctl/"*) printf 'npm'; return ;; esac
+  if [[ "$(basename "$SCRIPT_DIR")" == "runnerctl" || "$(basename "$SCRIPT_DIR")" == "libexec" ]]; then printf 'shell'; return; fi
   printf 'unknown'
 }
-
-infer_install_prefix() {
-  if [[ -n "${RUNNERCTL_INSTALL_PREFIX:-}" ]]; then
-    printf '%s' "$RUNNERCTL_INSTALL_PREFIX"
-    return
-  fi
-  if [[ "$(basename "$SCRIPT_DIR")" == "bin" ]]; then
-    (cd "$SCRIPT_DIR/.." && pwd)
-    return
-  fi
-  printf '%s' "$HOME/.local"
-}
-
-upgrade_command_for() {
-  local method="$1"
-  case "$method" in
-    homebrew)
-      if command -v brew >/dev/null 2>&1 && brew list --versions runnerctl 2>/dev/null | grep -q 'HEAD-'; then
-        printf 'brew update && brew upgrade --fetch-HEAD runnerctl'
-      else
-        printf 'brew update && brew upgrade runnerctl'
-      fi
-      ;;
-    pnpm) printf 'pnpm add -g github:%s#vLATEST' "$RUNNERCTL_REPO" ;;
-    npm) printf 'npm install -g github:%s#vLATEST' "$RUNNERCTL_REPO" ;;
-    shell) printf 'install latest GitHub Release with install.sh and SHA-256 verification' ;;
-    *) printf 'reinstall runnerctl using a supported installer' ;;
-  esac
-}
-
-upgrade_status() {
-  local json="${1:-0}" latest method available=false command
-  latest="$(latest_release_version)"
-  method="$(detect_install_method)"
-  if version_is_newer "$latest" "$VERSION"; then available=true; fi
-  command="$(upgrade_command_for "$method")"
-  command="${command//LATEST/$latest}"
-
+upgrade_command_for(){ case "$1" in homebrew) printf 'brew update && brew upgrade runnerctl' ;; pnpm) printf 'pnpm add -g github:%s#v%s' "$RUNNERCTL_REPO" "$2" ;; npm) printf 'npm install -g github:%s#v%s' "$RUNNERCTL_REPO" "$2" ;; shell) printf 'install GitHub Release v%s with install.sh and SHA-256 verification' "$2" ;; *) printf 'reinstall runnerctl using a supported installer' ;; esac; }
+upgrade_check(){
+  local json="$1" latest method available=false command
+  latest="$(latest_release_version)" || { printf 'runnerctl: failed to resolve latest release\n' >&2; return 1; }
+  method="$(detect_install_method)"; version_is_newer "$latest" "$VERSION" && available=true; command="$(upgrade_command_for "$method" "$latest")"
   if [[ "$json" -eq 1 ]]; then
-    printf '{"current_version":'; json_quote "$VERSION"
-    printf ',"latest_version":'; json_quote "$latest"
-    printf ',"update_available":%s' "$available"
-    printf ',"install_method":'; json_quote "$method"
-    printf ',"update_command":'; json_quote "$command"
-    printf '}\n'
+    printf '{"current_version":"%s","latest_version":"%s","update_available":%s,"install_method":"%s","update_command":"' "$VERSION" "$latest" "$available" "$method"
+    printf '%s' "$command" | sed 's/\\/\\\\/g;s/"/\\"/g'; printf '"}\n'
   else
-    printf 'Current version: %s\n' "$VERSION"
-    printf 'Latest version:  %s\n' "$latest"
-    printf 'Installation:    %s\n' "$method"
-    if [[ "$available" == true ]]; then
-      printf 'Update available: yes\n'
-      printf 'Update command:   %s\n' "$command"
-    else
-      printf 'Update available: no\n'
-    fi
+    printf 'Current version: %s\nLatest version:  %s\nInstallation:    %s\nUpdate available: %s\n' "$VERSION" "$latest" "$method" "$([[ "$available" == true ]] && printf yes || printf no)"
+    [[ "$available" == false ]] || printf 'Update command:   %s\n' "$command"
   fi
 }
-
-perform_upgrade() {
-  local latest method prefix installer
-  latest="$(latest_release_version)"
-  method="$(detect_install_method)"
-
-  if ! version_is_newer "$latest" "$VERSION"; then
-    printf 'runnerctl %s is already up to date.\n' "$VERSION"
-    return 0
-  fi
-
-  printf 'Upgrading runnerctl %s -> %s using %s\n' "$VERSION" "$latest" "$method"
-
-  case "$method" in
-    homebrew)
-      command -v brew >/dev/null 2>&1 || usage_error "Homebrew installation detected but brew is unavailable"
-      brew update
-      if brew list --versions runnerctl 2>/dev/null | grep -q 'HEAD-'; then
-        brew upgrade --fetch-HEAD runnerctl
-      else
-        brew upgrade runnerctl
-      fi
-      ;;
-    pnpm)
-      command -v pnpm >/dev/null 2>&1 || usage_error "pnpm installation detected but pnpm is unavailable"
-      pnpm add -g "github:$RUNNERCTL_REPO#v$latest"
-      ;;
-    npm)
-      command -v npm >/dev/null 2>&1 || usage_error "npm installation detected but npm is unavailable"
-      npm install -g "github:$RUNNERCTL_REPO#v$latest"
-      ;;
-    shell)
-      command -v curl >/dev/null 2>&1 || usage_error "curl is required for shell self-update"
-      prefix="$(infer_install_prefix)"
-      installer="$(mktemp)"
-      curl -fsSL "https://raw.githubusercontent.com/$RUNNERCTL_REPO/main/install.sh" -o "$installer"
-      RUNNERCTL_VERSION="$latest" PREFIX="$prefix" bash "$installer"
-      rm -f "$installer"
-      ;;
-    *)
-      printf 'runnerctl: could not determine how this installation is managed.\n' >&2
-      printf 'Reinstall with Homebrew, npm/pnpm, or the shell installer, then retry.\n' >&2
-      return 1
-      ;;
-  esac
-
-  printf 'Upgrade command completed. Run `runnerctl version` to verify the installed version.\n'
+cmd_upgrade(){
+  local check=0 json=0 arg latest; shift || true
+  for arg in "$@"; do case "$arg" in --check) check=1 ;; --json) json=1 ;; --help|-h) legacy upgrade --help; return ;; *) printf 'runnerctl: unknown upgrade option: %s\n' "$arg" >&2; return 2 ;; esac; done
+  [[ "$json" -eq 0 || "$check" -eq 1 ]] || { printf 'runnerctl: --json requires --check\n' >&2; return 2; }
+  if [[ "$check" -eq 1 ]]; then upgrade_check "$json"; return; fi
+  latest="$(latest_release_version)" || return 1
+  if ! version_is_newer "$latest" "$VERSION"; then printf 'runnerctl %s is already up to date.\n' "$VERSION"; return; fi
+  RUNNERCTL_LATEST_VERSION="$latest" legacy upgrade
 }
-
-cmd_upgrade() {
-  local check=0 json=0 arg
-  shift || true
-  for arg in "$@"; do
-    case "$arg" in
-      --check) check=1 ;;
-      --json) json=1 ;;
-      --help|-h) command_help upgrade; return ;;
-      *) usage_error "unknown upgrade option: $arg" ;;
-    esac
-  done
-  [[ "$json" -eq 0 || "$check" -eq 1 ]] || usage_error "--json requires --check"
-  if [[ "$check" -eq 1 ]]; then
-    upgrade_status "$json"
-  else
-    perform_upgrade
-  fi
-}
-
-completion_bash() {
-  cat <<'EOF'
-_runnerctl_complete() {
-  local cur commands auth_commands host_commands ci_commands queue_commands
-  COMPREPLY=()
-  cur="${COMP_WORDS[COMP_CWORD]}"
-  commands="add list status logs job-logs start stop restart start-all stop-all remove auth doctor host ci capacity queue upgrade self-update agent completion help version"
-  auth_commands="list status use login setup-git doctor map unmap mappings resolve"
-  host_commands="inspect bootstrap"
-  ci_commands="check"
-  queue_commands="status enable disable set drain resume"
-  if [[ ${COMP_CWORD} -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
-  elif [[ "${COMP_WORDS[1]}" == "auth" && ${COMP_CWORD} -eq 2 ]]; then
-    COMPREPLY=( $(compgen -W "$auth_commands" -- "$cur") )
-  elif [[ "${COMP_WORDS[1]}" == "host" && ${COMP_CWORD} -eq 2 ]]; then
-    COMPREPLY=( $(compgen -W "$host_commands" -- "$cur") )
-  elif [[ "${COMP_WORDS[1]}" == "ci" && ${COMP_CWORD} -eq 2 ]]; then
-    COMPREPLY=( $(compgen -W "$ci_commands" -- "$cur") )
-  elif [[ "${COMP_WORDS[1]}" == "queue" && ${COMP_CWORD} -eq 2 ]]; then
-    COMPREPLY=( $(compgen -W "$queue_commands" -- "$cur") )
-  elif [[ "${COMP_WORDS[1]}" == "completion" && ${COMP_CWORD} -eq 2 ]]; then
-    COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
-  fi
-}
-complete -F _runnerctl_complete runnerctl
-EOF
-}
-
-completion_zsh() {
-  cat <<'EOF'
-#compdef runnerctl
-_runnerctl() {
-  local -a commands auth_commands host_commands ci_commands queue_commands
-  commands=(
-    'add:Register self-hosted runners' 'list:List runners' 'status:Show status'
-    'logs:Show runner logs' 'job-logs:Show worker logs' 'start:Start runner'
-    'stop:Stop runner' 'restart:Restart runner' 'start-all:Start all runners'
-    'stop-all:Stop all runners' 'remove:Remove runner' 'auth:Manage GitHub accounts'
-    'doctor:Check environment' 'host:Inspect or bootstrap host prerequisites'
-    'ci:Check workflow compatibility for self-hosted runners' 'capacity:Estimate safe host concurrency'
-    'queue:Manage host-wide job concurrency' 'upgrade:Upgrade runnerctl' 'self-update:Upgrade runnerctl'
-    'agent:AI agent contract' 'completion:Shell completion' 'help:Command help' 'version:Print version'
-  )
-  auth_commands=('list' 'status' 'use' 'login' 'setup-git' 'doctor' 'map' 'unmap' 'mappings' 'resolve')
-  host_commands=('inspect' 'bootstrap')
-  ci_commands=('check')
-  queue_commands=('status' 'enable' 'disable' 'set' 'drain' 'resume')
-  if (( CURRENT == 2 )); then
-    _describe 'command' commands
-  elif [[ "$words[2]" == auth && CURRENT == 3 ]]; then
-    _values 'auth command' $auth_commands
-  elif [[ "$words[2]" == host && CURRENT == 3 ]]; then
-    _values 'host command' $host_commands
-  elif [[ "$words[2]" == ci && CURRENT == 3 ]]; then
-    _values 'ci command' $ci_commands
-  elif [[ "$words[2]" == queue && CURRENT == 3 ]]; then
-    _values 'queue command' $queue_commands
-  elif [[ "$words[2]" == completion && CURRENT == 3 ]]; then
-    _values 'shell' bash zsh fish
-  fi
-}
-_runnerctl "$@"
-EOF
-}
-
-completion_fish() {
-  cat <<'EOF'
-complete -c runnerctl -f
-complete -c runnerctl -n '__fish_use_subcommand' -a 'add list status logs job-logs start stop restart start-all stop-all remove auth doctor host ci capacity queue upgrade self-update agent completion help version'
-complete -c runnerctl -n '__fish_seen_subcommand_from auth' -a 'list status use login setup-git doctor map unmap mappings resolve'
-complete -c runnerctl -n '__fish_seen_subcommand_from host' -a 'inspect bootstrap'
-complete -c runnerctl -n '__fish_seen_subcommand_from ci' -a 'check'
-complete -c runnerctl -n '__fish_seen_subcommand_from queue' -a 'status enable disable set drain resume'
-complete -c runnerctl -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
-EOF
-}
-
-cmd_completion() {
-  case "${1:-}" in
-    bash) completion_bash ;;
-    zsh) completion_zsh ;;
-    fish) completion_fish ;;
-    --help|-h|"") command_help completion ;;
-    *) usage_error "unsupported shell: $1 (expected bash, zsh, or fish)" ;;
-  esac
-}
-
-help_topic_from_args() {
-  local first="${1:-}" second="${2:-}"
-  if [[ "$first" == "auth" && -n "$second" && "$second" != --* ]]; then
-    case "$second" in map|resolve) printf 'auth %s' "$second"; return ;; esac
-  fi
-  printf '%s' "$first"
-}
-
-main() {
-  local cmd="${1:-help}" core topic sub helper
+main(){
+  local cmd="${1:-help}" helper
   case "$cmd" in
-    --help|-h) root_help; return ;;
-    --version|-v|version) printf '%s\n' "$VERSION"; return ;;
-    help)
-      shift || true
-      if [[ $# -eq 0 ]]; then root_help; return; fi
-      topic="$(help_topic_from_args "${1:-}" "${2:-}")"
-      command_help "$topic"
-      return
-      ;;
-    agent|ai-agent)
-      shift || true
-      case "${1:-}" in
-        --json) agent_json ;;
-        --help|-h|"") agent_help ;;
-        *) usage_error "unknown agent option: $1" ;;
-      esac
-      return
-      ;;
-    completion)
-      shift || true
-      cmd_completion "$@"
-      return
-      ;;
-    upgrade|self-update)
-      cmd_upgrade "$@"
-      return
-      ;;
-  esac
-
-  if [[ "${2:-}" == "--help" || "${2:-}" == "-h" ]]; then
-    command_help "$cmd"
-    return
-  fi
-  if [[ "$cmd" == "auth" && ( "${3:-}" == "--help" || "${3:-}" == "-h" ) ]]; then
-    topic="$(help_topic_from_args "$cmd" "${2:-}")"
-    command_help "$topic"
-    return
-  fi
-
-  case "$cmd" in
-    doctor)
-      if [[ "${2:-}" == "--json" ]]; then cmd_doctor_json; else core="$(find_core)"; bash "$core" doctor | sed -E "s/^version: .*/version: $VERSION/"; fi
-      ;;
-    host)
-      helper="$(find_host_helper)"
-      shift || true
-      exec bash "$helper" "$@"
-      ;;
-    ci)
-      helper="$(find_ci_helper)"
-      shift || true
-      exec bash "$helper" "$@"
-      ;;
-    capacity)
-      helper="$(find_queue_helper)"
-      shift || true
-      exec bash "$helper" capacity "$@"
-      ;;
+    version|--version|-v) printf '%s\n' "$VERSION" ;;
+    scheduler) shift || true; helper="$(find_scheduler)"; exec bash "$helper" "$@" ;;
     queue)
-      helper="$(find_queue_helper)"
-      shift || true
-      exec bash "$helper" "$@"
-      ;;
-    list)
-      if [[ "${2:-}" == "--json" ]]; then cmd_list_json; else exec bash "$(find_core)" "$@"; fi
-      ;;
-    status)
-      if [[ "${2:-}" == "--json" ]]; then cmd_status_json "${3:-}"
-      elif [[ "${3:-}" == "--json" ]]; then cmd_status_json "${2:-}"
-      else exec bash "$(find_core)" "$@"; fi
-      ;;
-    auth)
-      sub="${2:-status}"
-      case "$sub" in
-        list|status)
-          if [[ "${3:-}" == "--json" ]]; then cmd_auth_accounts_json; else exec bash "$(find_core)" "$@"; fi
-          ;;
-        mappings)
-          if [[ "${3:-}" == "--json" ]]; then cmd_auth_mappings_json; else exec bash "$(find_core)" "$@"; fi
-          ;;
-        resolve)
-          if [[ "${4:-}" == "--json" ]]; then cmd_auth_resolve_json "${3:-}"; else exec bash "$(find_core)" "$@"; fi
-          ;;
-        doctor)
-          if [[ "${3:-}" == "--json" ]]; then cmd_auth_doctor_json; else exec bash "$(find_core)" "$@"; fi
-          ;;
-        *) exec bash "$(find_core)" "$@" ;;
-      esac
-      ;;
-    *) exec bash "$(find_core)" "$@" ;;
+      if [[ "${2:-}" == "--help" || "${2:-}" == "-h" || "${2:-}" == "help" ]]; then helper="$(find_queue)" || { legacy "$@"; return; }; exec bash "$helper" --help; fi
+      exec bash "$(find_legacy)" "$@" ;;
+    --help|-h) legacy "$@"; append_scheduler_help ;;
+    help) if [[ "${2:-}" == scheduler ]]; then helper="$(find_scheduler)"; exec bash "$helper" --help; fi; legacy "$@" ;;
+    agent|ai-agent) if [[ "${2:-}" == --json ]]; then agent_json; else legacy "$@"; append_scheduler_agent; fi ;;
+    completion) shift || true; completion "$@" ;;
+    upgrade|self-update) cmd_upgrade "$@" ;;
+    *) exec bash "$(find_legacy)" "$@" ;;
   esac
 }
-
 main "$@"
