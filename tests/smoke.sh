@@ -171,10 +171,11 @@ DIST_DIR="$tmp/dist" bash "$ROOT/scripts/package-release.sh" >/dev/null
 [[ -f "$tmp/dist/runnerctl-queue.sha256" ]]
 [[ -f "$tmp/dist/runnerctl-$VERSION.tar.gz" ]]
 
-tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q '^bin/runnerctl-host$'
-tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q '^bin/runnerctl-ci$'
-tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q '^bin/runnerctl-hooks$'
-tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" | grep -q '^bin/runnerctl-queue$'
+tar -tzf "$tmp/dist/runnerctl-$VERSION.tar.gz" > "$tmp/release-tar.list"
+grep -q '^bin/runnerctl-host$' "$tmp/release-tar.list"
+grep -q '^bin/runnerctl-ci$' "$tmp/release-tar.list"
+grep -q '^bin/runnerctl-hooks$' "$tmp/release-tar.list"
+grep -q '^bin/runnerctl-queue$' "$tmp/release-tar.list"
 
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$tmp/dist" && sha256sum -c runnerctl.sha256 runnerctl-core.sha256 runnerctl-host.sha256 runnerctl-ci.sha256 runnerctl-hooks.sha256 runnerctl-queue.sha256 "runnerctl-$VERSION.tar.gz.sha256" >/dev/null)
