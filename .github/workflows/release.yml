@@ -90,17 +90,16 @@ jobs:
         run: bash tests/smoke.sh
 
       - name: Publish npm package
+        id: npm_publish
         if: steps.version.outputs.npm_package_exists != 'true' && env.NODE_AUTH_TOKEN != ''
+        continue-on-error: true
         shell: bash
-        run: |
-          set -euo pipefail
-          if ! npm publish --access public --provenance; then
-            echo "::error::npm publish failed for ${{ steps.version.outputs.package_name }}. NPM_TOKEN must be a Granular Access Token with read-write access to this package/scope and bypass-2FA enabled."
-            exit 1
-          fi
+        run: npm publish --access public --provenance
 
       - name: Verify npm publication
-        if: steps.version.outputs.npm_package_exists != 'true' && env.NODE_AUTH_TOKEN != ''
+        id: npm_verify
+        if: steps.version.outputs.npm_package_exists != 'true' && env.NODE_AUTH_TOKEN != '' && steps.npm_publish.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -114,12 +113,20 @@ jobs:
             fi
             sleep 2
           done
-          echo "::error::npm registry did not report ${package}@${version} after publication."
+          echo "npm registry did not report ${package}@${version} after publication." >&2
           exit 1
 
-      - name: Skip npm publish when NPM_TOKEN is missing
-        if: steps.version.outputs.npm_package_exists != 'true' && env.NODE_AUTH_TOKEN == ''
-        run: echo 'NPM_TOKEN is not configured; npm publication remains pending.'
+      - name: Report pending npm publication
+        if: steps.version.outputs.npm_package_exists != 'true' && (env.NODE_AUTH_TOKEN == '' || steps.npm_publish.outcome == 'failure' || steps.npm_verify.outcome == 'failure')
+        shell: bash
+        run: |
+          if [[ -z "$NODE_AUTH_TOKEN" ]]; then
+            echo "::warning::NPM_TOKEN is not configured. GitHub Release will still be created; npm publication remains pending."
+          elif [[ "${{ steps.npm_publish.outcome }}" == "failure" ]]; then
+            echo "::warning::npm publish failed for ${{ steps.version.outputs.package_name }}. GitHub Release will still be created. Check that NPM_TOKEN is a Granular Access Token with read-write access to this package/scope and bypass-2FA enabled."
+          else
+            echo "::warning::npm publish returned success but registry verification did not complete. GitHub Release will still be created; verify npm separately."
+          fi
 
       - name: Build release artifacts
         if: steps.version.outputs.github_release_exists != 'true'
