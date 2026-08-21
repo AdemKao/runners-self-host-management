@@ -1,0 +1,5 @@
+name: github-tag-action fixture
+description: fixture
+runs:
+  using: docker
+  image: Dockerfile
