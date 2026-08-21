@@ -224,9 +224,9 @@ doctor_os_value() {
 }
 
 doctor_os_compatibility() {
-  local os="$1" id="$2" version="$3" major="" lower_id
+  local os="$1" id="$2" version="$3" major lower_id
   lower_id="$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')"
-  major="$(printf '%s' "$version" | sed -E 's/^([0-9]+).*/\1/;t;d')"
+  major="${version%%[^0-9]*}"
 
   if [[ "$os" == "Darwin" ]]; then
     printf 'compatible|macOS self-hosted runner'
@@ -321,11 +321,20 @@ doctor_active_account() {
     --jq ".hosts[\"$GITHUB_HOST\"][] | select(.active == true) | .login" 2>/dev/null | head -n 1 || true
 }
 
+doctor_add_message() {
+  local message="$1"
+  if [[ -n "$DOCTOR_MESSAGES" ]]; then
+    DOCTOR_MESSAGES="$DOCTOR_MESSAGES"$'\n'"$message"
+  else
+    DOCTOR_MESSAGES="$message"
+  fi
+}
+
 doctor_add_missing_dependency() {
   local name="$1" present="$2"
   if [[ "$present" != true ]]; then
     DOCTOR_STATUS="fail"
-    DOCTOR_MESSAGES+=("Required command missing: $name.")
+    doctor_add_message "Required command missing: $name."
   fi
 }
 
@@ -366,13 +375,13 @@ doctor_collect() {
   if [[ "$DOCTOR_OS" == "Linux" && "$DOCTOR_DOCKER_DAEMON" == true ]]; then DOCTOR_CONTAINER_READY=true; fi
 
   DOCTOR_STATUS="ok"
-  DOCTOR_MESSAGES=()
+  DOCTOR_MESSAGES=""
   if [[ "$DOCTOR_COMPAT" == "unsupported" ]]; then
     DOCTOR_STATUS="fail"
-    DOCTOR_MESSAGES+=("Unsupported runner OS: ${DOCTOR_PRETTY:-$DOCTOR_OS}. ${DOCTOR_COMPAT_REASON}.")
+    doctor_add_message "Unsupported runner OS: ${DOCTOR_PRETTY:-$DOCTOR_OS}. ${DOCTOR_COMPAT_REASON}."
   elif [[ "$DOCTOR_COMPAT" == "unknown" ]]; then
     DOCTOR_STATUS="warning"
-    DOCTOR_MESSAGES+=("Runner OS compatibility is unknown: ${DOCTOR_PRETTY:-$DOCTOR_OS}. ${DOCTOR_COMPAT_REASON}.")
+    doctor_add_message "Runner OS compatibility is unknown: ${DOCTOR_PRETTY:-$DOCTOR_OS}. ${DOCTOR_COMPAT_REASON}."
   fi
 
   doctor_add_missing_dependency gh "$DOCTOR_GH"
@@ -382,39 +391,42 @@ doctor_collect() {
 
   if (( DOCTOR_MEM_KB > 0 && DOCTOR_MEM_KB < 1048576 )); then
     [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
-    DOCTOR_MESSAGES+=("Very low memory (${DOCTOR_MEM_MIB} MiB); general Node/Docker CI is not recommended. Use at least 2 GiB, preferably 4 GiB+.")
+    doctor_add_message "Very low memory (${DOCTOR_MEM_MIB} MiB); general Node/Docker CI is not recommended. Use at least 2 GiB, preferably 4 GiB+."
   elif (( DOCTOR_MEM_KB > 0 && DOCTOR_MEM_KB < 2097152 )); then
     [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
-    DOCTOR_MESSAGES+=("Low memory (${DOCTOR_MEM_MIB} MiB); Node/Docker builds may be unstable. 4 GiB+ is recommended.")
+    doctor_add_message "Low memory (${DOCTOR_MEM_MIB} MiB); Node/Docker builds may be unstable. 4 GiB+ is recommended."
   fi
 
   if (( DOCTOR_MEM_KB > 0 && DOCTOR_MEM_KB < 2097152 && DOCTOR_SWAP_KB == 0 )); then
     [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
-    DOCTOR_MESSAGES+=("No swap detected on a low-memory host.")
+    doctor_add_message "No swap detected on a low-memory host."
   fi
 
   if (( DOCTOR_DISK_AVAIL_KB > 0 && DOCTOR_DISK_AVAIL_KB < 2097152 )); then
     [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
-    DOCTOR_MESSAGES+=("Less than 2 GiB is available on the runner root filesystem.")
+    doctor_add_message "Less than 2 GiB is available on the runner root filesystem."
   elif (( DOCTOR_DISK_AVAIL_KB > 0 && DOCTOR_DISK_AVAIL_KB < 5242880 )); then
     [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
-    DOCTOR_MESSAGES+=("Less than 5 GiB is available on the runner root filesystem.")
+    doctor_add_message "Less than 5 GiB is available on the runner root filesystem."
   fi
 
   if [[ "$DOCTOR_DOCKER" == true && "$DOCTOR_DOCKER_DAEMON" != true ]]; then
     [[ "$DOCTOR_STATUS" == "ok" ]] && DOCTOR_STATUS="warning"
-    DOCTOR_MESSAGES+=("Docker CLI is installed but the daemon is not reachable by this user.")
+    doctor_add_message "Docker CLI is installed but the daemon is not reachable by this user."
   fi
 }
 
 doctor_print_messages_json() {
   local first=true message
   printf '['
-  for message in "${DOCTOR_MESSAGES[@]}"; do
-    if [[ "$first" != true ]]; then printf ','; fi
-    doctor_json_quote "$message"
-    first=false
-  done
+  if [[ -n "$DOCTOR_MESSAGES" ]]; then
+    while IFS= read -r message; do
+      [[ -n "$message" ]] || continue
+      if [[ "$first" != true ]]; then printf ','; fi
+      doctor_json_quote "$message"
+      first=false
+    done <<< "$DOCTOR_MESSAGES"
+  fi
   printf ']'
 }
 
@@ -492,9 +504,12 @@ cmd_doctor_text() {
   printf 'result: %s\n' "$(printf '%s' "$DOCTOR_STATUS" | tr '[:lower:]' '[:upper:]')"
 
   local message
-  for message in "${DOCTOR_MESSAGES[@]}"; do
-    printf 'warning: %s\n' "$message"
-  done
+  if [[ -n "$DOCTOR_MESSAGES" ]]; then
+    while IFS= read -r message; do
+      [[ -n "$message" ]] || continue
+      printf 'warning: %s\n' "$message"
+    done <<< "$DOCTOR_MESSAGES"
+  fi
 }
 
 main() {
