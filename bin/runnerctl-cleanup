@@ -4,6 +4,7 @@ set -euo pipefail
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 RUNNERS_DIR="$RUNNERCTL_HOME/runners"
 HOOKS_DIR="$RUNNERCTL_HOME/hooks"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 info(){ printf '[runnerctl] %s\n' "$*"; }
 warn(){ printf '[runnerctl] WARN: %s\n' "$*" >&2; }
@@ -21,7 +22,8 @@ Usage:
   runnerctl cleanup run RUNNER [--dry-run]
 
 The post-job hook deletes only GITHUB_WORKSPACE. Package-manager caches,
-Docker data, and runner logs are preserved.
+Docker data, and runner logs are preserved. runnerctl composes cleanup with
+other runnerctl-managed completion hooks such as the global queue.
 EOF
 }
 
@@ -29,18 +31,30 @@ runner_dir(){ printf '%s/%s' "$RUNNERS_DIR" "$1"; }
 hook_path(){ printf '%s/%s/job-completed-cleanup.sh' "$HOOKS_DIR" "$1"; }
 meta_get(){ awk -F= -v k="$2" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$1/.runnerctl-meta" 2>/dev/null || true; }
 
+find_hooks_helper(){
+  local candidates=(
+    "${RUNNERCTL_HOOKS_HELPER:-}"
+    "$SCRIPT_DIR/runnerctl-hooks"
+    "$SCRIPT_DIR/../libexec/runnerctl-hooks"
+    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-hooks"
+  ) candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -f "$candidate" ]] || continue
+    printf '%s' "$candidate"
+    return 0
+  done
+  die "runner hook helper not found; reinstall runnerctl"
+}
+
 require_runner(){
   local d; d="$(runner_dir "$1")"
   [[ -d "$d" && -f "$d/.runnerctl-meta" ]] || die "Unknown runner: $1"
   printf '%s' "$d"
 }
 
-configured_hook(){
-  awk -F= '$1=="ACTIONS_RUNNER_HOOK_JOB_COMPLETED"{sub(/^[^=]*=/,"");print;exit}' "$1/.env" 2>/dev/null || true
-}
-
 restart_service(){
   local d="$1"
+  [[ "${RUNNERCTL_SKIP_SERVICE_RESTART:-0}" == 1 ]] && return 0
   [[ -x "$d/svc.sh" && -f "$d/.service" ]] || { warn "runner $(basename "$d") needs a manual restart"; return 0; }
   if [[ "$(uname -s)" == Linux ]]; then
     (cd "$d" && sudo ./svc.sh stop >/dev/null 2>&1 || true)
@@ -72,34 +86,22 @@ EOF
   chmod 0755 "$h"
 }
 
-set_env(){
-  local d="$1" h="$2" cur tmp
-  cur="$(configured_hook "$d")"
-  if [[ -n "$cur" && "$cur" != "$h" ]]; then
-    case "$cur" in "$HOOKS_DIR"/*/job-completed-cleanup.sh) ;; *) die "Custom completion hook already configured: $cur";; esac
-  fi
-  tmp="$(mktemp)"
-  [[ -f "$d/.env" ]] && awk -F= '$1!="ACTIONS_RUNNER_HOOK_JOB_COMPLETED"' "$d/.env" >"$tmp"
-  printf 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=%s\n' "$h" >>"$tmp"
-  mv "$tmp" "$d/.env"
-}
-
 enable_one(){
-  local n="$1" d h
-  d="$(require_runner "$n")"; h="$(hook_path "$n")"
-  write_hook "$n" "$d"; set_env "$d" "$h"; restart_service "$d"
+  local n="$1" d h hooks
+  d="$(require_runner "$n")"; h="$(hook_path "$n")"; hooks="$(find_hooks_helper)"
+  write_hook "$n" "$d"
+  RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" register "$n" completed cleanup "$h" >/dev/null
+  restart_service "$d"
   info "Automatic workspace cleanup enabled: $n"
 }
 
 disable_one(){
-  local n="$1" d h cur tmp
-  d="$(require_runner "$n")"; h="$(hook_path "$n")"; cur="$(configured_hook "$d")"
-  [[ -z "$cur" || "$cur" == "$h" ]] || die "Refusing to remove custom hook: $cur"
-  tmp="$(mktemp)"
-  [[ -f "$d/.env" ]] && awk -F= '$1!="ACTIONS_RUNNER_HOOK_JOB_COMPLETED"' "$d/.env" >"$tmp"
-  mv "$tmp" "$d/.env"
-  rm -f "$h"; rmdir "$(dirname "$h")" 2>/dev/null || true
-  restart_service "$d"; info "Automatic workspace cleanup disabled: $n"
+  local n="$1" d h hooks
+  d="$(require_runner "$n")"; h="$(hook_path "$n")"; hooks="$(find_hooks_helper)"
+  RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" unregister "$n" completed cleanup >/dev/null
+  rm -f "$h"
+  restart_service "$d"
+  info "Automatic workspace cleanup disabled: $n"
 }
 
 workspace(){
@@ -114,9 +116,9 @@ workspace_kb(){
 }
 
 status_one(){
-  local n="$1" json="$2" d h cur enabled=false kb
-  d="$(require_runner "$n")"; h="$(hook_path "$n")"; cur="$(configured_hook "$d")"; kb="$(workspace_kb "$d")"
-  [[ "$cur" == "$h" && -f "$h" ]] && enabled=true
+  local n="$1" json="$2" d h hooks enabled=false kb
+  d="$(require_runner "$n")"; h="$(hook_path "$n")"; hooks="$(find_hooks_helper)"; kb="$(workspace_kb "$d")"
+  if [[ -f "$h" ]] && RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" has "$n" completed cleanup >/dev/null 2>&1; then enabled=true; fi
   if [[ "$json" -eq 1 ]]; then
     printf '{"name":"%s","enabled":%s,"workspace_kb":%s}\n' "$n" "$enabled" "$kb"
   else
