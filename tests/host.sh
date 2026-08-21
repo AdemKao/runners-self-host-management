@@ -48,6 +48,14 @@ exit 0
 EOF_BREW
 chmod +x "$tmp/bin/brew"
 
+for cmd in git gh curl tar; do
+  cat > "$tmp/bin/$cmd" <<'EOF_CMD'
+#!/usr/bin/env bash
+exit 0
+EOF_CMD
+  chmod +x "$tmp/bin/$cmd"
+done
+
 run_host() {
   env PATH="$tmp/bin:/usr/bin:/bin" \
     RUNNERCTL_HOST_OS_RELEASE_FILE="$1" \
