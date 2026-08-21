@@ -33,6 +33,7 @@ jobs:
           bash -n install.sh
           bash -n scripts/package-release.sh
           bash -n tests/smoke.sh
+          bash -n tests/installer.sh
           bash -n tests/launchd-status.sh
           bash -n tests/cleanup.sh
           bash -n tests/doctor.sh
@@ -43,6 +44,9 @@ jobs:
 
       - name: Run smoke tests
         run: bash tests/smoke.sh
+
+      - name: Run installer regression tests
+        run: bash tests/installer.sh
 
       - name: Run cleanup regression tests
         run: bash tests/cleanup.sh

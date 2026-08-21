@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="0.4.2"
-NEXT_VERSION="0.4.3"
+VERSION="0.4.3"
+NEXT_VERSION="0.4.4"
 
 bash -n "$ROOT/runnerctl"
 bash -n "$ROOT/runnerctl-base"
@@ -19,6 +19,7 @@ bash -n "$ROOT/tests/host.sh"
 bash -n "$ROOT/tests/ci-check.sh"
 bash -n "$ROOT/tests/hooks.sh"
 bash -n "$ROOT/tests/queue.sh"
+bash -n "$ROOT/tests/installer.sh"
 
 [[ "$(bash "$ROOT/runnerctl" version)" == "$VERSION" ]]
 [[ "$(bash "$ROOT/bin/runnerctl" version)" == "$VERSION" ]]
@@ -149,12 +150,18 @@ PREFIX="$tmp/local" bash "$ROOT/install.sh" >/dev/null
 [[ -x "$tmp/local/libexec/runnerctl/runnerctl-ci" ]]
 [[ -x "$tmp/local/libexec/runnerctl/runnerctl-hooks" ]]
 [[ -x "$tmp/local/libexec/runnerctl/runnerctl-queue" ]]
+[[ -x "$tmp/local/libexec/runnerctl/bin/runnerctl-host" ]]
+[[ -x "$tmp/local/libexec/runnerctl/bin/runnerctl-ci" ]]
+[[ -x "$tmp/local/libexec/runnerctl/bin/runnerctl-hooks" ]]
+[[ -x "$tmp/local/libexec/runnerctl/bin/runnerctl-queue" ]]
 [[ "$($tmp/local/bin/runnerctl version)" == "$VERSION" ]]
 $tmp/local/bin/runnerctl agent --json | grep -q '"agent_ready": true'
 $tmp/local/bin/runnerctl host --help | grep -q 'host prerequisites'
 $tmp/local/bin/runnerctl ci --help | grep -q 'GitHub Actions workflows'
 $tmp/local/bin/runnerctl capacity --help | grep -q 'safe job concurrency'
 $tmp/local/bin/runnerctl queue --help | grep -q 'host-wide execution gate'
+RUNNERCTL_HOME="$tmp/installed-data" "$tmp/local/bin/runnerctl" capacity --json | node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.recommended) process.exit(1)'
+RUNNERCTL_HOME="$tmp/installed-data" "$tmp/local/bin/runnerctl" queue status --json | node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.enabled!==false) process.exit(1)'
 
 DIST_DIR="$tmp/dist" bash "$ROOT/scripts/package-release.sh" >/dev/null
 [[ -x "$tmp/dist/runnerctl" ]]

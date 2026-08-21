@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-22
+
+### Fixed
+- Shell release installs no longer fail at process exit under `set -u` because temporary-directory cleanup no longer references a function-local variable after it goes out of scope.
+- Shell and Homebrew installs now preserve the source-compatible `bin/runnerctl-*` helper layout expected by `runnerctl-base`, so `host`, `ci`, `capacity`, and `queue` commands resolve their installed helpers correctly.
+- Existing flattened shell-install helper paths under `libexec/runnerctl/` remain available for compatibility.
+
+### Added
+- Tagged-release installer regression coverage that verifies SHA-256 manifests, successful shell exit, installed queue/capacity execution, and queue hook registration without starting a runner service.
+
 ## [0.4.2] - 2026-08-22
 
 ### Added
@@ -100,7 +110,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The project began with the initial `runnerctl` implementation for managing multiple GitHub Actions self-hosted runners on one host, including runner registration, service lifecycle management, logs, removal, environment diagnostics, installation tooling, CI, and local isolation guidance.
 
-[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.3
 [0.4.2]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.2
 [0.4.1]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.1
 [0.4.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.0
