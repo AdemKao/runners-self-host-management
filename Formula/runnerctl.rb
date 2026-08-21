@@ -37,7 +37,7 @@ class Runnerctl < Formula
     assert_match "AI AGENT", shell_output("#{bin}/runnerctl --help")
     assert_match "workspace cleanup", shell_output("#{bin}/runnerctl cleanup --help")
     assert_match "host prerequisites", shell_output("#{bin}/runnerctl host --help")
-    assert_match "workflow compatibility", shell_output("#{bin}/runnerctl ci --help")
+    assert_match "GitHub Actions workflows", shell_output("#{bin}/runnerctl ci --help")
     assert_match '"agent_ready": true', shell_output("#{bin}/runnerctl agent --json")
     assert_match '"current_version":"0.4.1"', shell_output("RUNNERCTL_LATEST_VERSION=0.4.1 RUNNERCTL_INSTALL_METHOD=homebrew #{bin}/runnerctl upgrade --check --json")
   end
