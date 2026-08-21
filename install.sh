@@ -6,6 +6,7 @@ REF="${RUNNERCTL_REF:-main}"
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
 LIBEXEC_DIR="$PREFIX/libexec/runnerctl"
+LIBEXEC_BIN_DIR="$LIBEXEC_DIR/bin"
 SCRIPT_DIR=""
 LOCAL_FRONTEND=""
 LOCAL_BASE=""
@@ -15,6 +16,7 @@ LOCAL_HOST=""
 LOCAL_CI=""
 LOCAL_HOOKS=""
 LOCAL_QUEUE=""
+INSTALL_TMP_DIR=""
 
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,17 +33,36 @@ fi
 info() { printf '[runnerctl-install] %s\n' "$*"; }
 die() { printf '[runnerctl-install] ERROR: %s\n' "$*" >&2; exit 1; }
 
+cleanup_install_tmp() {
+  if [[ -n "${INSTALL_TMP_DIR:-}" ]]; then
+    rm -rf -- "$INSTALL_TMP_DIR"
+    INSTALL_TMP_DIR=""
+  fi
+}
+trap cleanup_install_tmp EXIT
+
+install_helper() {
+  local source="$1" name="$2"
+  [[ -f "$source" ]] || return 0
+  install -m 0755 "$source" "$LIBEXEC_DIR/$name"
+  install -m 0755 "$source" "$LIBEXEC_BIN_DIR/$name"
+}
+
 install_files() {
   local frontend="$1" base="$2" core="$3" cleanup="$4" host="${5:-}" ci="${6:-}" hooks="${7:-}" queue="${8:-}"
-  mkdir -p "$BIN_DIR" "$LIBEXEC_DIR"
+  mkdir -p "$BIN_DIR" "$LIBEXEC_DIR" "$LIBEXEC_BIN_DIR"
   install -m 0755 "$frontend" "$BIN_DIR/runnerctl"
   install -m 0755 "$base" "$LIBEXEC_DIR/runnerctl-base"
   install -m 0755 "$core" "$LIBEXEC_DIR/runnerctl-core"
   install -m 0755 "$cleanup" "$LIBEXEC_DIR/runnerctl-cleanup"
-  [[ -z "$host" || ! -f "$host" ]] || install -m 0755 "$host" "$LIBEXEC_DIR/runnerctl-host"
-  [[ -z "$ci" || ! -f "$ci" ]] || install -m 0755 "$ci" "$LIBEXEC_DIR/runnerctl-ci"
-  [[ -z "$hooks" || ! -f "$hooks" ]] || install -m 0755 "$hooks" "$LIBEXEC_DIR/runnerctl-hooks"
-  [[ -z "$queue" || ! -f "$queue" ]] || install -m 0755 "$queue" "$LIBEXEC_DIR/runnerctl-queue"
+
+  # Keep the historical flattened helper paths while also preserving the source
+  # layout expected by runnerctl-base ($SCRIPT_DIR/bin/runnerctl-*).
+  [[ -z "$host" ]] || install_helper "$host" runnerctl-host
+  [[ -z "$ci" ]] || install_helper "$ci" runnerctl-ci
+  [[ -z "$hooks" ]] || install_helper "$hooks" runnerctl-hooks
+  [[ -z "$queue" ]] || install_helper "$queue" runnerctl-queue
+
   info "Installed runnerctl to $BIN_DIR/runnerctl"
 }
 
@@ -85,7 +106,7 @@ download_verified() {
 install_from_release() {
   local version="$1" base tmp host="" ci="" hooks="" queue=""
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  INSTALL_TMP_DIR="$tmp"
   base="https://github.com/$REPO/releases/download/v$version"
 
   info "Downloading runnerctl v$version"
@@ -123,12 +144,14 @@ install_from_release() {
     info "Release v$version uses the legacy single-file layout"
     install_legacy_binary "$tmp/runnerctl"
   fi
+
+  cleanup_install_tmp
 }
 
 install_from_ref() {
   local tmp
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  INSTALL_TMP_DIR="$tmp"
   info "Installing from $REPO@$REF"
   curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/runnerctl" -o "$tmp/runnerctl"
   curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/runnerctl-base" -o "$tmp/runnerctl-base"
@@ -139,6 +162,7 @@ install_from_ref() {
   curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-hooks" -o "$tmp/runnerctl-hooks"
   curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-queue" -o "$tmp/runnerctl-queue"
   install_files "$tmp/runnerctl" "$tmp/runnerctl-base" "$tmp/runnerctl-core" "$tmp/runnerctl-cleanup" "$tmp/runnerctl-host" "$tmp/runnerctl-ci" "$tmp/runnerctl-hooks" "$tmp/runnerctl-queue"
+  cleanup_install_tmp
 }
 
 main() {
