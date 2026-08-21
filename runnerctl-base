@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.2"
+VERSION="0.3.3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 RUNNERS_DIR="$RUNNERCTL_HOME/runners"
@@ -75,18 +75,16 @@ launchd_service_running() {
   domain="gui/$(id -u)"
 
   if output="$(launchctl print "$domain/$label" 2>/dev/null)"; then
-    if printf '%s
-' "$output" | grep -Eq '^[[:space:]]*state = running([[:space:]]|$)'; then
+    if printf '%s\n' "$output" | grep -Eq '^[[:space:]]*state = running([[:space:]]|$)'; then
       return 0
     fi
-    if printf '%s
-' "$output" | grep -Eq '^[[:space:]]*pid = [1-9][0-9]*([[:space:]]|$)'; then
+    if printf '%s\n' "$output" | grep -Eq '^[[:space:]]*pid = [1-9][0-9]*([[:space:]]|$)'; then
       return 0
     fi
     return 1
   fi
 
-  launchctl list 2>/dev/null | awk -v label="$label"     '$3 == label && $1 ~ /^[0-9]+$/ { found=1 } END { exit(found ? 0 : 1) }'
+  launchctl list 2>/dev/null | awk -v label="$label" '$3 == label && $1 ~ /^[0-9]+$/ { found=1 } END { exit(found ? 0 : 1) }'
 }
 
 service_state() {
