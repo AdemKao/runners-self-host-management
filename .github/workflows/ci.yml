@@ -26,12 +26,14 @@ jobs:
           bash -n runnerctl-base
           bash -n bin/runnerctl
           bash -n bin/runnerctl-cleanup
+          bash -n bin/runnerctl-host
           bash -n install.sh
           bash -n scripts/package-release.sh
           bash -n tests/smoke.sh
           bash -n tests/launchd-status.sh
           bash -n tests/cleanup.sh
           bash -n tests/doctor.sh
+          bash -n tests/host.sh
 
       - name: Run smoke tests
         run: bash tests/smoke.sh
@@ -41,6 +43,9 @@ jobs:
 
       - name: Run doctor regression tests
         run: bash tests/doctor.sh
+
+      - name: Run host bootstrap regression tests
+        run: bash tests/host.sh
 
       - name: Validate npm package
         run: npm pack --dry-run
