@@ -140,7 +140,14 @@ log_failure(){ ensure_dirs; printf '%s provider=%s event=%s delivery=failed\n' "
 run_provider_once(){
   local provider="$1" event="$2" message="$3" payload_file="$4" path
   path="$(provider_path "$provider")" || { warn "provider not found: $provider"; return 1; }
-  RUNNERCTL_NOTIFY_EVENT="$event" RUNNERCTL_NOTIFY_MESSAGE="$message" RUNNERCTL_NOTIFY_HOOK="${RUNNERCTL_NOTIFY_HOOK:-0}" bash "$path" <"$payload_file"
+  case "$provider" in
+    telegram|line|webhook)
+      RUNNERCTL_NOTIFY_EVENT="$event" RUNNERCTL_NOTIFY_MESSAGE="$message" RUNNERCTL_NOTIFY_HOOK="${RUNNERCTL_NOTIFY_HOOK:-0}" bash "$path" <"$payload_file"
+      ;;
+    *)
+      RUNNERCTL_NOTIFY_EVENT="$event" RUNNERCTL_NOTIFY_MESSAGE="$message" RUNNERCTL_NOTIFY_HOOK="${RUNNERCTL_NOTIFY_HOOK:-0}" "$path" <"$payload_file"
+      ;;
+  esac
 }
 run_provider(){
   local provider="$1" event="$2" message="$3" payload_file="$4" attempts=2 i
@@ -153,8 +160,10 @@ run_provider(){
   return 1
 }
 dispatch_event(){
-  local event="$1" runner="$2" custom="$3" provider_filter="${4:-}" message payload_file provider any=0 failures=0
-  ensure_dirs; message="$(render_message "$event" "$runner" "$custom")"; payload_file="$(mktemp "$NOTIFY_DIR/event.XXXXXX")"; trap 'rm -f "${payload_file:-}"' RETURN
+  local event="$1" runner="$2" custom="$3" provider_filter="${4:-}" message payload_file provider any=0 failures=0 rc=0
+  ensure_dirs
+  message="$(render_message "$event" "$runner" "$custom")"
+  payload_file="$(mktemp "$NOTIFY_DIR/event.XXXXXX")"
   build_event "$event" "$runner" "$message" >"$payload_file"; chmod 0600 "$payload_file"
   while IFS= read -r provider; do
     [[ -n "$provider" ]] || continue
@@ -163,8 +172,11 @@ dispatch_event(){
     if ! provider_configured "$provider"; then warn "provider $provider is not configured"; failures=$((failures+1)); continue; fi
     run_provider "$provider" "$event" "$message" "$payload_file" || failures=$((failures+1))
   done < <(provider_names)
-  if [[ "$any" -eq 0 ]]; then warn "no configured notification providers selected"; return 1; fi
-  [[ "$failures" -eq 0 ]]
+  if [[ "$any" -eq 0 ]]; then warn "no configured notification providers selected"; rc=1
+  elif [[ "$failures" -ne 0 ]]; then rc=1
+  fi
+  rm -f "$payload_file"
+  return "$rc"
 }
 
 restart_runner(){
@@ -178,7 +190,8 @@ restart_runner(){
   fi
 }
 write_hook_target(){
-  local runner="$1" phase="$2" target="$HOOK_TARGET_DIR/$runner-$phase.sh" self
+  local runner="$1" phase="$2" target self
+  target="$HOOK_TARGET_DIR/$runner-$phase.sh"
   self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
   mkdir -p "$HOOK_TARGET_DIR"
   cat >"$target" <<EOF
