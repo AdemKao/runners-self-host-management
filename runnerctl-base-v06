@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.6.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNERCTL_REPO="${RUNNERCTL_REPO:-AdemKao/runners-self-host-management}"
+
+find_v05(){
+  local candidates=("${RUNNERCTL_BASE_V05:-}" "$SCRIPT_DIR/runnerctl-base-v05" "$SCRIPT_DIR/../libexec/runnerctl-base-v05" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-base-v05") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  printf 'runnerctl: v0.5 compatibility frontend not found. Reinstall runnerctl.\n' >&2; exit 1
+}
+find_notify(){
+  local candidates=("${RUNNERCTL_NOTIFY_HELPER:-}" "$SCRIPT_DIR/bin/runnerctl-notify" "$SCRIPT_DIR/runnerctl-notify" "$SCRIPT_DIR/../libexec/runnerctl-notify" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-notify") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  return 1
+}
+v05(){ bash "$(find_v05)" "$@"; }
+
+append_notify_help(){ cat <<'EOF'
+
+Notifications and integrations:
+  notify         Send runner/job/scheduler events to Telegram, LINE, webhooks,
+                 or executable provider plugins.
+
+Common commands:
+  runnerctl notify status --json
+  runnerctl notify providers
+  runnerctl notify test --provider telegram
+  runnerctl notify enable RUNNER --events job.started,job.completed
+
+Secrets are read from environment variables and are never printed by status.
+Use `runnerctl notify --help` for provider setup and plugin details.
+EOF
+}
+append_notify_agent(){ cat <<'EOF'
+
+Notifications:
+  notify status       read-only notification/provider inspection
+  notify providers    read-only provider discovery
+  notify test         sends an external test notification
+  notify emit         sends an external event notification
+  notify enable       mutates local runner hooks/config and may restart service
+  notify disable      removes notification hooks/config and may restart service
+
+Hook-driven delivery is fail-open: an unavailable notification provider must not
+make a GitHub Actions job fail. Manual test/emit commands fail when delivery fails.
+EOF
+}
+agent_json(){
+  v05 agent --json | sed "s/\"version\": \"0\.5\.0\"/\"version\": \"$VERSION\"/" | awk '
+    /"scheduler resume":/ && !added {
+      print
+      print "    \"notify status\": {\"effect\": \"read-only-local\", \"json\": true},"
+      print "    \"notify providers\": {\"effect\": \"read-only-local\", \"json\": true},"
+      print "    \"notify test\": {\"effect\": \"external-notification\"},"
+      print "    \"notify emit\": {\"effect\": \"external-notification\"},"
+      print "    \"notify enable\": {\"effect\": \"mutating-local-hooks-and-service\"},"
+      print "    \"notify disable\": {\"effect\": \"mutating-local-hooks-and-service\"},"
+      added=1; next
+    }
+    { print }
+  '
+}
+completion(){
+  local shell="${1:-}"
+  case "$shell" in
+    bash)
+      v05 completion bash | sed 's/capacity queue scheduler upgrade/capacity queue notify scheduler upgrade/'
+      cat <<'EOF'
+_runnerctl_notify_complete() {
+  if [[ "${COMP_WORDS[1]:-}" == "notify" && ${COMP_CWORD} -eq 2 ]]; then
+    COMPREPLY=( $(compgen -W "status providers test emit enable disable" -- "${COMP_WORDS[COMP_CWORD]}") )
+  else
+    _runnerctl_scheduler_complete "$@"
+  fi
+}
+complete -F _runnerctl_notify_complete runnerctl
+EOF
+      ;;
+    zsh) v05 completion zsh | sed "s/'scheduler:GitHub-native queued-job scheduler'/'notify:Notification integrations and provider plugins' 'scheduler:GitHub-native queued-job scheduler'/" ;;
+    fish)
+      v05 completion fish | sed 's/capacity queue scheduler upgrade/capacity queue notify scheduler upgrade/'
+      printf "%s\n" "complete -c runnerctl -n '__fish_seen_subcommand_from notify' -a 'status providers test emit enable disable'"
+      ;;
+    *) v05 completion "$@" ;;
+  esac
+}
+notify_fail_open(){
+  local event="$1" message="$2" helper
+  helper="$(find_notify 2>/dev/null || true)"; [[ -n "$helper" ]] || return 0
+  RUNNERCTL_NOTIFY_HOOK=1 bash "$helper" emit "$event" --message "$message" >/dev/null 2>&1 || true
+}
+cmd_scheduler(){
+  local sub="${2:-}" rc event=""; case "$sub" in
+    enable) event=scheduler.enabled ;;
+    disable) event=scheduler.disabled ;;
+    drain) event=scheduler.drained ;;
+    resume) event=scheduler.resumed ;;
+    tick) event="" ;;
+    *) exec bash "$(find_v05)" "$@" ;;
+  esac
+  if v05 "$@"; then
+    [[ -z "$event" ]] || notify_fail_open "$event" "runnerctl $event"
+    return 0
+  fi
+  rc=$?; notify_fail_open scheduler.error "runnerctl scheduler command failed: $sub"; return "$rc"
+}
+normalize_version(){ local v="${1#v}"; printf '%s' "${v%%-*}"; }
+version_is_newer(){
+  local lhs rhs a b c x y z
+  lhs="$(normalize_version "$1")"; rhs="$(normalize_version "$2")"
+  IFS=. read -r a b c <<<"$lhs"; IFS=. read -r x y z <<<"$rhs"
+  a="${a:-0}"; b="${b:-0}"; c="${c:-0}"; x="${x:-0}"; y="${y:-0}"; z="${z:-0}"
+  ((10#$a > 10#$x)) && return 0; ((10#$a < 10#$x)) && return 1
+  ((10#$b > 10#$y)) && return 0; ((10#$b < 10#$y)) && return 1
+  ((10#$c > 10#$z))
+}
+latest_release_version(){
+  if [[ -n "${RUNNERCTL_LATEST_VERSION:-}" ]]; then normalize_version "$RUNNERCTL_LATEST_VERSION"; return; fi
+  command -v curl >/dev/null 2>&1 || { printf 'runnerctl: curl is required to check for updates\n' >&2; return 1; }
+  local response version
+  response="$(curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$RUNNERCTL_REPO/releases/latest")" || return 1
+  version="$(printf '%s\n' "$response" | sed -n 's/.*"tag_name":[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$version" ]] || return 1; normalize_version "$version"
+}
+detect_install_method(){
+  if [[ -n "${RUNNERCTL_INSTALL_METHOD:-}" ]]; then printf '%s' "$RUNNERCTL_INSTALL_METHOD"; return; fi
+  if [[ "${RUNNERCTL_CORE:-}" == *"/Cellar/runnerctl/"* ]]; then printf 'homebrew'; return; fi
+  if command -v brew >/dev/null 2>&1 && brew list --versions runnerctl >/dev/null 2>&1; then printf 'homebrew'; return; fi
+  case "$SCRIPT_DIR" in *"/.pnpm/"*|*"/pnpm/global/"*) printf 'pnpm'; return ;; *"/node_modules/@ademkao/runnerctl"|*"/node_modules/@ademkao/runnerctl/"*) printf 'npm'; return ;; esac
+  if [[ "$(basename "$SCRIPT_DIR")" == "runnerctl" || "$(basename "$SCRIPT_DIR")" == "libexec" ]]; then printf 'shell'; return; fi
+  printf 'unknown'
+}
+upgrade_command_for(){ case "$1" in homebrew) printf 'brew update && brew upgrade runnerctl' ;; pnpm) printf 'pnpm add -g github:%s#v%s' "$RUNNERCTL_REPO" "$2" ;; npm) printf 'npm install -g github:%s#v%s' "$RUNNERCTL_REPO" "$2" ;; shell) printf 'install GitHub Release v%s with install.sh and SHA-256 verification' "$2" ;; *) printf 'reinstall runnerctl using a supported installer' ;; esac; }
+upgrade_check(){
+  local json="$1" latest method available=false command
+  latest="$(latest_release_version)" || { printf 'runnerctl: failed to resolve latest release\n' >&2; return 1; }
+  method="$(detect_install_method)"; version_is_newer "$latest" "$VERSION" && available=true; command="$(upgrade_command_for "$method" "$latest")"
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"current_version":"%s","latest_version":"%s","update_available":%s,"install_method":"%s","update_command":"' "$VERSION" "$latest" "$available" "$method"
+    printf '%s' "$command" | sed 's/\\/\\\\/g;s/"/\\"/g'; printf '"}\n'
+  else
+    printf 'Current version: %s\nLatest version:  %s\nInstallation:    %s\nUpdate available: %s\n' "$VERSION" "$latest" "$method" "$([[ "$available" == true ]] && printf yes || printf no)"
+    [[ "$available" == false ]] || printf 'Update command:   %s\n' "$command"
+  fi
+}
+cmd_upgrade(){
+  local check=0 json=0 arg latest; shift || true
+  for arg in "$@"; do case "$arg" in --check) check=1 ;; --json) json=1 ;; --help|-h) v05 upgrade --help; return ;; *) printf 'runnerctl: unknown upgrade option: %s\n' "$arg" >&2; return 2 ;; esac; done
+  [[ "$json" -eq 0 || "$check" -eq 1 ]] || { printf 'runnerctl: --json requires --check\n' >&2; return 2; }
+  if [[ "$check" -eq 1 ]]; then upgrade_check "$json"; return; fi
+  latest="$(latest_release_version)" || return 1
+  if ! version_is_newer "$latest" "$VERSION"; then printf 'runnerctl %s is already up to date.\n' "$VERSION"; return; fi
+  RUNNERCTL_LATEST_VERSION="$latest" v05 upgrade
+}
+main(){
+  local cmd="${1:-help}" helper
+  case "$cmd" in
+    version|--version|-v) printf '%s\n' "$VERSION" ;;
+    notify) shift || true; helper="$(find_notify)" || { printf 'runnerctl: notification helper not found. Reinstall runnerctl.\n' >&2; return 1; }; exec bash "$helper" "$@" ;;
+    scheduler) cmd_scheduler "$@" ;;
+    --help|-h) v05 "$@"; append_notify_help ;;
+    help) if [[ "${2:-}" == notify ]]; then helper="$(find_notify)" || return 1; exec bash "$helper" --help; fi; v05 "$@" ;;
+    agent|ai-agent) if [[ "${2:-}" == --json ]]; then agent_json; else v05 "$@"; append_notify_agent; fi ;;
+    completion) shift || true; completion "$@" ;;
+    upgrade|self-update) cmd_upgrade "$@" ;;
+    *) exec bash "$(find_v05)" "$@" ;;
+  esac
+}
+main "$@"
