@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.5.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNERCTL_REPO="${RUNNERCTL_REPO:-AdemKao/runners-self-host-management}"
+
+find_legacy(){
+  local candidates=("${RUNNERCTL_BASE_LEGACY:-}" "$SCRIPT_DIR/runnerctl-base-legacy" "$SCRIPT_DIR/../libexec/runnerctl-base-legacy" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-base-legacy") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  printf 'runnerctl: legacy frontend base not found. Reinstall runnerctl.\n' >&2; exit 1
+}
+find_scheduler(){
+  local candidates=("${RUNNERCTL_SCHEDULER_HELPER:-}" "$SCRIPT_DIR/bin/runnerctl-scheduler" "$SCRIPT_DIR/runnerctl-scheduler" "$SCRIPT_DIR/../libexec/runnerctl-scheduler" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-scheduler") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  printf 'runnerctl: scheduler helper not found. Reinstall runnerctl.\n' >&2; exit 1
+}
+find_queue(){
+  local candidates=("${RUNNERCTL_QUEUE_HELPER:-}" "$SCRIPT_DIR/bin/runnerctl-queue" "$SCRIPT_DIR/runnerctl-queue" "$SCRIPT_DIR/../libexec/runnerctl-queue" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-queue") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  return 1
+}
+legacy(){ bash "$(find_legacy)" "$@"; }
+append_scheduler_help(){ cat <<'EOF'
+
+GitHub-native scheduling:
+  scheduler      Keep scheduled jobs in GitHub's queued state until host
+                 capacity is available by granting a routing label.
+
+Migration:
+  Add `runnerctl-scheduled` to scheduled jobs:
+    runs-on: [self-hosted, linux, x64, runnerctl-scheduled]
+
+The v0.4.x `queue` command remains available as a legacy host-side admission
+gate. It is not GitHub-native queueing and waiting there can consume part of a
+job's timeout-minutes budget.
+EOF
+}
+append_scheduler_agent(){ cat <<'EOF'
+
+GitHub-native scheduler:
+  scheduler status       read-only scheduler and queued-demand inspection
+  scheduler enable       enables label-gated GitHub-native scheduling
+  scheduler disable      disables scheduling and revokes scheduler labels
+  scheduler tick         one-shot reconciliation
+  scheduler drain        stops granting new capacity; running jobs continue
+  scheduler resume       resumes capacity grants
+
+Scheduled workflows MUST request the configured routing label. Jobs without the
+label bypass the scheduler. Prefer scheduler over the legacy queue gate when
+GitHub queued/in_progress semantics and timeout-minutes accuracy matter.
+EOF
+}
+agent_json(){
+  legacy agent --json | sed "s/\"version\": \"0\.4\.3\"/\"version\": \"$VERSION\"/" | awk '
+    /"queue resume":/ && !added {
+      print
+      print "    \"scheduler status\": {\"effect\": \"read-only-network\", \"json\": true},"
+      print "    \"scheduler enable\": {\"effect\": \"mutating-github-runner-labels-and-local-controller\"},"
+      print "    \"scheduler disable\": {\"effect\": \"mutating-github-runner-labels-and-local-controller\"},"
+      print "    \"scheduler tick\": {\"effect\": \"mutating-github-runner-labels\", \"json\": true},"
+      print "    \"scheduler drain\": {\"effect\": \"mutating-local-config-and-github-runner-labels\"},"
+      print "    \"scheduler resume\": {\"effect\": \"mutating-local-config-and-github-runner-labels\"},"
+      added=1; next
+    }
+    { print }
+  '
+}
+completion(){
+  local shell="${1:-}"
+  case "$shell" in
+    bash)
+      legacy completion bash | sed 's/capacity queue upgrade/capacity queue scheduler upgrade/'
+      cat <<'EOF'
+_runnerctl_scheduler_complete() {
+  if [[ "${COMP_WORDS[1]:-}" == "scheduler" && ${COMP_CWORD} -eq 2 ]]; then
+    COMPREPLY=( $(compgen -W "status enable disable tick run drain resume" -- "${COMP_WORDS[COMP_CWORD]}") )
+  else
+    _runnerctl_complete "$@"
+  fi
+}
+complete -F _runnerctl_scheduler_complete runnerctl
+EOF
+      ;;
+    zsh) legacy completion zsh | sed "s/'queue:Manage host-wide job concurrency' 'upgrade:/'queue:Manage host-wide job concurrency' 'scheduler:GitHub-native queued-job scheduler' 'upgrade:/" ;;
+    fish)
+      legacy completion fish | sed "s/capacity queue upgrade/capacity queue scheduler upgrade/"
+      printf "%s\n" "complete -c runnerctl -n '__fish_seen_subcommand_from scheduler' -a 'status enable disable tick run drain resume'"
+      ;;
+    *) legacy completion "$@" ;;
+  esac
+}
+normalize_version(){ local v="${1#v}"; printf '%s' "${v%%-*}"; }
+version_is_newer(){
+  local lhs rhs a b c x y z
+  lhs="$(normalize_version "$1")"; rhs="$(normalize_version "$2")"
+  IFS=. read -r a b c <<<"$lhs"; IFS=. read -r x y z <<<"$rhs"
+  a="${a:-0}"; b="${b:-0}"; c="${c:-0}"; x="${x:-0}"; y="${y:-0}"; z="${z:-0}"
+  ((10#$a > 10#$x)) && return 0; ((10#$a < 10#$x)) && return 1
+  ((10#$b > 10#$y)) && return 0; ((10#$b < 10#$y)) && return 1
+  ((10#$c > 10#$z))
+}
+latest_release_version(){
+  if [[ -n "${RUNNERCTL_LATEST_VERSION:-}" ]]; then normalize_version "$RUNNERCTL_LATEST_VERSION"; return; fi
+  command -v curl >/dev/null 2>&1 || { printf 'runnerctl: curl is required to check for updates\n' >&2; return 1; }
+  local response version
+  response="$(curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$RUNNERCTL_REPO/releases/latest")" || return 1
+  version="$(printf '%s\n' "$response" | sed -n 's/.*"tag_name":[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$version" ]] || return 1; normalize_version "$version"
+}
+detect_install_method(){
+  if [[ -n "${RUNNERCTL_INSTALL_METHOD:-}" ]]; then printf '%s' "$RUNNERCTL_INSTALL_METHOD"; return; fi
+  if [[ "${RUNNERCTL_CORE:-}" == *"/Cellar/runnerctl/"* ]]; then printf 'homebrew'; return; fi
+  if command -v brew >/dev/null 2>&1 && brew list --versions runnerctl >/dev/null 2>&1; then printf 'homebrew'; return; fi
+  case "$SCRIPT_DIR" in *"/.pnpm/"*|*"/pnpm/global/"*) printf 'pnpm'; return ;; *"/node_modules/@ademkao/runnerctl"|*"/node_modules/@ademkao/runnerctl/"*) printf 'npm'; return ;; esac
+  if [[ "$(basename "$SCRIPT_DIR")" == "runnerctl" || "$(basename "$SCRIPT_DIR")" == "libexec" ]]; then printf 'shell'; return; fi
+  printf 'unknown'
+}
+upgrade_command_for(){ case "$1" in homebrew) printf 'brew update && brew upgrade runnerctl' ;; pnpm) printf 'pnpm add -g github:%s#v%s' "$RUNNERCTL_REPO" "$2" ;; npm) printf 'npm install -g github:%s#v%s' "$RUNNERCTL_REPO" "$2" ;; shell) printf 'install GitHub Release v%s with install.sh and SHA-256 verification' "$2" ;; *) printf 'reinstall runnerctl using a supported installer' ;; esac; }
+upgrade_check(){
+  local json="$1" latest method available=false command
+  latest="$(latest_release_version)" || { printf 'runnerctl: failed to resolve latest release\n' >&2; return 1; }
+  method="$(detect_install_method)"; version_is_newer "$latest" "$VERSION" && available=true; command="$(upgrade_command_for "$method" "$latest")"
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"current_version":"%s","latest_version":"%s","update_available":%s,"install_method":"%s","update_command":"' "$VERSION" "$latest" "$available" "$method"
+    printf '%s' "$command" | sed 's/\\/\\\\/g;s/"/\\"/g'; printf '"}\n'
+  else
+    printf 'Current version: %s\nLatest version:  %s\nInstallation:    %s\nUpdate available: %s\n' "$VERSION" "$latest" "$method" "$([[ "$available" == true ]] && printf yes || printf no)"
+    [[ "$available" == false ]] || printf 'Update command:   %s\n' "$command"
+  fi
+}
+cmd_upgrade(){
+  local check=0 json=0 arg latest; shift || true
+  for arg in "$@"; do case "$arg" in --check) check=1 ;; --json) json=1 ;; --help|-h) legacy upgrade --help; return ;; *) printf 'runnerctl: unknown upgrade option: %s\n' "$arg" >&2; return 2 ;; esac; done
+  [[ "$json" -eq 0 || "$check" -eq 1 ]] || { printf 'runnerctl: --json requires --check\n' >&2; return 2; }
+  if [[ "$check" -eq 1 ]]; then upgrade_check "$json"; return; fi
+  latest="$(latest_release_version)" || return 1
+  if ! version_is_newer "$latest" "$VERSION"; then printf 'runnerctl %s is already up to date.\n' "$VERSION"; return; fi
+  RUNNERCTL_LATEST_VERSION="$latest" legacy upgrade
+}
+main(){
+  local cmd="${1:-help}" helper
+  case "$cmd" in
+    version|--version|-v) printf '%s\n' "$VERSION" ;;
+    scheduler) shift || true; helper="$(find_scheduler)"; exec bash "$helper" "$@" ;;
+    queue)
+      if [[ "${2:-}" == "--help" || "${2:-}" == "-h" || "${2:-}" == "help" ]]; then helper="$(find_queue)" || { legacy "$@"; return; }; exec bash "$helper" --help; fi
+      exec bash "$(find_legacy)" "$@" ;;
+    --help|-h) legacy "$@"; append_scheduler_help ;;
+    help) if [[ "${2:-}" == scheduler ]]; then helper="$(find_scheduler)"; exec bash "$helper" --help; fi; legacy "$@" ;;
+    agent|ai-agent) if [[ "${2:-}" == --json ]]; then agent_json; else legacy "$@"; append_scheduler_agent; fi ;;
+    completion) shift || true; completion "$@" ;;
+    upgrade|self-update) cmd_upgrade "$@" ;;
+    *) exec bash "$(find_legacy)" "$@" ;;
+  esac
+}
+main "$@"
