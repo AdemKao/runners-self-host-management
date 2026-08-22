@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
+RUNNERS_DIR="$RUNNERCTL_HOME/runners"
+SCHED_DIR="$RUNNERCTL_HOME/scheduler"
+CONFIG_FILE="$SCHED_DIR/config"
+PID_FILE="$SCHED_DIR/controller.pid"
+LOG_FILE="$SCHED_DIR/scheduler.log"
+CURSOR_FILE="$SCHED_DIR/cursor"
+GITHUB_HOST="${RUNNERCTL_GITHUB_HOST:-${GH_HOST:-github.com}}"
+DEFAULT_LABEL="${RUNNERCTL_SCHEDULER_LABEL:-runnerctl-scheduled}"
+DEFAULT_INTERVAL="${RUNNERCTL_SCHEDULER_INTERVAL:-30}"
+info(){ printf '[runnerctl-scheduler] %s\n' "$*"; }
+warn(){ printf '[runnerctl-scheduler] WARN: %s\n' "$*" >&2; }
+die(){ printf '[runnerctl-scheduler] ERROR: %s\n' "$*" >&2; exit 1; }
+usage(){ cat <<'EOF'
+GitHub-native scheduler for runnerctl-managed repository runners.
+
+Usage:
+  runnerctl scheduler status [--json]
+  runnerctl scheduler enable [--max-concurrency N] [--interval SECONDS] [--label LABEL]
+  runnerctl scheduler disable
+  runnerctl scheduler tick [--json]
+  runnerctl scheduler run
+  runnerctl scheduler drain
+  runnerctl scheduler resume
+
+Scheduled workflows must request the custom routing label (default:
+runnerctl-scheduled). runnerctl grants that label to at most the configured
+number of managed repository runners. Jobs stay GitHub "queued" until a
+matching runner receives the label, so local waiting does not consume the
+job's timeout-minutes budget.
+
+Migration example:
+  runs-on: [self-hosted, linux, x64, runnerctl-scheduled]
+
+Important:
+  - Only repository-level runners managed by runnerctl are supported in v0.5.0.
+  - Jobs that omit the scheduler label bypass this scheduler.
+  - The legacy `runnerctl queue` command is a host-side admission gate and has
+    different timeout/UI semantics.
+  - `scheduler enable` starts a local background controller. For reboot-safe
+    operation, supervise `runnerctl scheduler run` with your service manager.
+EOF
+}
+json_quote(){ local value="${1:-}"; value="${value//\\/\\\\}"; value="${value//\"/\\\"}"; value="${value//$'\n'/\\n}"; value="${value//$'\r'/\\r}"; value="${value//$'\t'/\\t}"; printf '"%s"' "$value"; }
+ensure_dirs(){ mkdir -p "$SCHED_DIR" "$RUNNERS_DIR"; }
+config_value(){ awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$CONFIG_FILE" 2>/dev/null || true; }
+scheduler_enabled(){ [[ "$(config_value enabled)" == true ]]; }
+scheduler_drained(){ [[ "$(config_value drained)" == true ]]; }
+max_concurrency(){ local n; n="$(config_value max_concurrency)"; [[ "$n" =~ ^[1-9][0-9]*$ ]] && printf '%s' "$n" || printf '1'; }
+poll_interval(){ local n; n="$(config_value interval_seconds)"; [[ "$n" =~ ^[1-9][0-9]*$ ]] && printf '%s' "$n" || printf '%s' "$DEFAULT_INTERVAL"; }
+gate_label(){ local v; v="$(config_value label)"; [[ -n "$v" ]] && printf '%s' "$v" || printf '%s' "$DEFAULT_LABEL"; }
+write_config(){ local enabled="$1" max="$2" interval="$3" label="$4" drained="$5" tmp; ensure_dirs; tmp="$(mktemp "$SCHED_DIR/config.XXXXXX")"; printf 'enabled=%s\nmax_concurrency=%s\ninterval_seconds=%s\nlabel=%s\ndrained=%s\n' "$enabled" "$max" "$interval" "$label" "$drained" >"$tmp"; mv "$tmp" "$CONFIG_FILE"; }
+legacy_queue_enabled(){ local f="$RUNNERCTL_HOME/queue/config"; [[ -f "$f" ]] || return 1; [[ "$(awk -F= '$1=="enabled"{print $2;exit}' "$f" 2>/dev/null || true)" == true ]]; }
+need_gh(){ command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) is required"; }
+active_account(){ gh auth status --active --hostname "$GITHUB_HOST" --json hosts --jq ".hosts[\"$GITHUB_HOST\"][] | select(.active == true) | .login" 2>/dev/null | head -n 1 || true; }
+account_token(){ local account="$1"; if [[ -n "${RUNNERCTL_SCHEDULER_TEST_TOKEN:-}" ]]; then printf '%s' "$RUNNERCTL_SCHEDULER_TEST_TOKEN"; return; fi; [[ -n "$account" ]] || account="$(active_account)"; [[ -n "$account" ]] || die "No GitHub account available for scheduler API access"; gh auth token --hostname "$GITHUB_HOST" --user "$account"; }
+gh_api_as(){ local account="$1" token; shift; token="$(account_token "$account")"; GH_TOKEN="$token" GH_HOST="$GITHUB_HOST" gh api -H "X-GitHub-Api-Version: 2026-03-10" "$@"; }
+meta_get(){ local dir="$1" key="$2"; awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$dir/.runnerctl-meta" 2>/dev/null || true; }
+managed_runner_rows(){ local d name repo account; mkdir -p "$RUNNERS_DIR"; for d in "$RUNNERS_DIR"/*; do [[ -f "$d/.runnerctl-meta" ]] || continue; name="$(meta_get "$d" name)"; [[ -n "$name" ]] || name="$(basename "$d")"; repo="$(meta_get "$d" repo)"; account="$(meta_get "$d" account)"; [[ -n "$repo" ]] || continue; [[ -n "$account" ]] || account="$(active_account)"; printf '%s\t%s\t%s\n' "$name" "$repo" "$account"; done; }
+safe_key(){ printf '%s__%s' "$1" "$2" | tr -cs 'A-Za-z0-9._-' '_'; }
+labels_has(){ local csv="$1" needle="$2"; case ",$csv," in *",$needle,"*) return 0 ;; *) return 1 ;; esac; }
+fetch_remote_runners(){ local account="$1" repo="$2" outfile="$3"; gh_api_as "$account" "repos/$repo/actions/runners?per_page=100" --jq '.runners[] | [.id,.name,.status,((.busy // false)|tostring),([.labels[]? | select(.type=="custom") | .name]|join(","))] | @tsv' >"$outfile"; }
+fetch_repo_demand(){
+  local account="$1" repo="$2" label="$3" work="$4" runs="$work/runs.tsv" jobs="$work/jobs.tsv" run_id labels count=0
+  : >"$runs"; : >"$jobs"
+  gh_api_as "$account" "repos/$repo/actions/runs?per_page=20" --jq '.workflow_runs[] | select(.status=="queued" or .status=="in_progress") | [.id,.created_at] | @tsv' >"$runs" || return 1
+  while IFS=$'\t' read -r run_id _; do [[ -n "$run_id" ]] || continue; gh_api_as "$account" "repos/$repo/actions/runs/$run_id/jobs?filter=all&per_page=100" --jq '.jobs[] | select(.status=="queued") | [(.id|tostring),.name,((.labels // [])|join(","))] | @tsv' >>"$jobs" || return 1; done <"$runs"
+  while IFS=$'\t' read -r _ _ labels; do labels_has "$labels" "$label" && count=$((count+1)); done <"$jobs"
+  printf '%s' "$count"
+}
+build_snapshot(){
+  local out="$1" work="$2" label="$3" name repo account key remote demand row id rname status busy labels has_gate
+  local demand_cache="$work/demand-cache.tsv"; : >"$out"; : >"$demand_cache"
+  while IFS=$'\t' read -r name repo account; do
+    [[ -n "$name" && -n "$repo" ]] || continue; key="$(safe_key "$account" "$repo")"; remote="$work/remote-$key.tsv"
+    if [[ ! -f "$remote" ]]; then if ! fetch_remote_runners "$account" "$repo" "$remote"; then warn "failed to read runner state for $repo; refusing scheduler mutations"; return 1; fi; fi
+    demand="$(awk -F'\t' -v a="$account" -v r="$repo" '$1==a && $2==r {print $3;found=1;exit} END{if(!found) exit 1}' "$demand_cache" 2>/dev/null || true)"
+    if [[ -z "$demand" ]]; then mkdir -p "$work/demand-$key"; if ! demand="$(fetch_repo_demand "$account" "$repo" "$label" "$work/demand-$key")"; then warn "failed to read queued jobs for $repo; refusing scheduler mutations"; return 1; fi; printf '%s\t%s\t%s\n' "$account" "$repo" "$demand" >>"$demand_cache"; fi
+    row="$(awk -F'\t' -v n="$name" '$2==n {print;exit}' "$remote")"; if [[ -z "$row" ]]; then warn "managed runner $name is not present in GitHub repository $repo; skipping it"; continue; fi
+    IFS=$'\t' read -r id rname status busy labels <<<"$row"; has_gate=false; labels_has "$labels" "$label" && has_gate=true
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$repo" "$account" "$id" "$status" "$busy" "$has_gate" "$demand" >>"$out"
+  done < <(managed_runner_rows)
+}
+add_gate(){ local account="$1" repo="$2" id="$3" label="$4"; gh_api_as "$account" --method POST "repos/$repo/actions/runners/$id/labels" -f "labels[]=$label" >/dev/null; }
+remove_gate(){ local account="$1" repo="$2" id="$3" label="$4"; gh_api_as "$account" --method DELETE "repos/$repo/actions/runners/$id/labels/$label" >/dev/null; }
+controller_running(){ local pid=""; [[ -f "$PID_FILE" ]] && pid="$(cat "$PID_FILE" 2>/dev/null || true)"; [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; }
+stop_controller(){ local pid=""; [[ -f "$PID_FILE" ]] && pid="$(cat "$PID_FILE" 2>/dev/null || true)"; if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done; fi; rm -f "$PID_FILE"; }
+start_controller(){ [[ "${RUNNERCTL_SCHEDULER_NO_BACKGROUND:-0}" == 1 ]] && return 0; controller_running && return 0; ensure_dirs; nohup bash "$0" run >>"$LOG_FILE" 2>&1 </dev/null & printf '%s\n' "$!" >"$PID_FILE"; }
+json_array_file(){ local file="$1" first=true value; printf '['; while IFS= read -r value; do [[ -n "$value" ]] || continue; [[ "$first" == true ]] || printf ','; first=false; json_quote "$value"; done <"$file"; printf ']'; }
+tick_once(){
+  local json="${1:-0}" enabled=false drained=false max interval label work snapshot current total_demand name repo account id status busy has_gate demand revoked granted candidates ordered slots last
+  scheduler_enabled && enabled=true; [[ "$enabled" == true ]] || die "scheduler is not enabled"; scheduler_drained && drained=true; max="$(max_concurrency)"; interval="$(poll_interval)"; label="$(gate_label)"
+  work="$(mktemp -d "$SCHED_DIR/tick.XXXXXX")"; snapshot="$work/snapshot.tsv"; revoked="$work/revoked"; granted="$work/granted"; candidates="$work/candidates.tsv"; ordered="$work/ordered.tsv"; : >"$revoked"; : >"$granted"; : >"$candidates"; : >"$ordered"
+  if ! build_snapshot "$snapshot" "$work" "$label"; then rm -rf "$work"; return 1; fi
+  current="$(awk -F'\t' '$7=="true"{n++} END{print n+0}' "$snapshot")"; total_demand="$(awk -F'\t' '{k=$2 SUBSEP $3; if(!seen[k]++){sum+=$8}} END{print sum+0}' "$snapshot")"
+  while IFS=$'\t' read -r name repo account id status busy has_gate demand; do [[ "$has_gate" == true ]] || continue; [[ "$busy" == true ]] && continue; if [[ "$drained" == true || "$status" != online || "$demand" -eq 0 ]]; then if remove_gate "$account" "$repo" "$id" "$label"; then printf '%s\n' "$name" >>"$revoked"; current=$((current-1)); else warn "failed to revoke scheduler label from $name"; rm -rf "$work"; return 1; fi; fi; done <"$snapshot"
+  if (( current > max )); then while IFS=$'\t' read -r name repo account id status busy has_gate demand; do (( current > max )) || break; [[ "$has_gate" == true && "$busy" != true ]] || continue; grep -Fxq "$name" "$revoked" 2>/dev/null && continue; if remove_gate "$account" "$repo" "$id" "$label"; then printf '%s\n' "$name" >>"$revoked"; current=$((current-1)); else rm -rf "$work"; return 1; fi; done <"$snapshot"; fi
+  if [[ "$drained" != true ]] && (( current < max )); then
+    while IFS=$'\t' read -r name repo account id status busy has_gate demand; do [[ "$has_gate" == false && "$status" == online && "$busy" != true && "$demand" -gt 0 ]] || continue; printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$repo" "$account" "$id" "$demand" >>"$candidates"; done <"$snapshot"
+    sort -t $'\t' -k2,2 -k1,1 "$candidates" >"$work/candidates.sorted"; last="$(cat "$CURSOR_FILE" 2>/dev/null || true)"; if [[ -n "$last" ]]; then awk -F'\t' -v last="$last" '$2>last' "$work/candidates.sorted" >>"$ordered"; awk -F'\t' -v last="$last" '$2<=last' "$work/candidates.sorted" >>"$ordered"; else cat "$work/candidates.sorted" >"$ordered"; fi
+    slots=$((max-current)); while IFS=$'\t' read -r name repo account id demand; do (( slots > 0 )) || break; if add_gate "$account" "$repo" "$id" "$label"; then printf '%s\n' "$name" >>"$granted"; printf '%s\n' "$repo" >"$CURSOR_FILE"; slots=$((slots-1)); current=$((current+1)); else warn "failed to grant scheduler label to $name; no further capacity will be granted this tick"; rm -rf "$work"; return 1; fi; done <"$ordered"
+  fi
+  if [[ "$json" -eq 1 ]]; then printf '{"enabled":true,"drained":%s,"max_concurrency":%s,"interval_seconds":%s,"label":' "$drained" "$max" "$interval"; json_quote "$label"; printf ',"managed_runners":%s,"gate_holders_after":%s,"queued_jobs":%s,"granted":' "$(wc -l <"$snapshot" | tr -d ' ')" "$current" "$total_demand"; json_array_file "$granted"; printf ',"revoked":'; json_array_file "$revoked"; printf '}\n'; else info "tick complete: queued=$total_demand gate_holders=$current/$max granted=$(wc -l <"$granted" | tr -d ' ') revoked=$(wc -l <"$revoked" | tr -d ' ')"; fi
+  rm -rf "$work"
+}
+print_status(){
+  local json="$1" enabled=false drained=false max interval label running=false work snapshot managed gated queued name repo account id status busy has_gate demand first=true
+  scheduler_enabled && enabled=true; scheduler_drained && drained=true; max="$(max_concurrency)"; interval="$(poll_interval)"; label="$(gate_label)"; controller_running && running=true
+  if [[ "$enabled" != true ]]; then if [[ "$json" -eq 1 ]]; then printf '{"enabled":false,"drained":%s,"max_concurrency":%s,"interval_seconds":%s,"label":' "$drained" "$max" "$interval"; json_quote "$label"; printf ',"controller_running":%s}\n' "$running"; else printf 'GitHub-native scheduler\n  enabled: false\n  controller running: %s\n  max concurrency: %s\n  interval: %ss\n  routing label: %s\n' "$running" "$max" "$interval" "$label"; fi; return; fi
+  work="$(mktemp -d "$SCHED_DIR/status.XXXXXX")"; snapshot="$work/snapshot.tsv"; build_snapshot "$snapshot" "$work" "$label" || { rm -rf "$work"; return 1; }; managed="$(wc -l <"$snapshot" | tr -d ' ')"; gated="$(awk -F'\t' '$7=="true"{n++} END{print n+0}' "$snapshot")"; queued="$(awk -F'\t' '{k=$2 SUBSEP $3;if(!seen[k]++){s+=$8}} END{print s+0}' "$snapshot")"
+  if [[ "$json" -eq 1 ]]; then printf '{"enabled":true,"drained":%s,"max_concurrency":%s,"interval_seconds":%s,"label":' "$drained" "$max" "$interval"; json_quote "$label"; printf ',"controller_running":%s,"managed_runners":%s,"gate_holders":%s,"queued_jobs":%s,"runners":[' "$running" "$managed" "$gated" "$queued"; while IFS=$'\t' read -r name repo account id status busy has_gate demand; do [[ "$first" == true ]] || printf ','; first=false; printf '{"name":'; json_quote "$name"; printf ',"repository":'; json_quote "$repo"; printf ',"account":'; json_quote "$account"; printf ',"github_id":%s,"status":' "$id"; json_quote "$status"; printf ',"busy":%s,"has_scheduler_label":%s,"queued_jobs_for_repo":%s}' "$busy" "$has_gate" "$demand"; done <"$snapshot"; printf ']}\n'; else printf 'GitHub-native scheduler\n  enabled:            true\n  drained:            %s\n  controller running: %s\n  max concurrency:    %s\n  interval:           %ss\n  routing label:      %s\n  managed runners:    %s\n  gate holders:       %s\n  queued jobs:        %s\n' "$drained" "$running" "$max" "$interval" "$label" "$managed" "$gated" "$queued"; fi
+  rm -rf "$work"
+}
+revoke_all_scheduler_labels(){ local label work snapshot name repo account id status busy has_gate demand rc=0; label="$(gate_label)"; work="$(mktemp -d "$SCHED_DIR/revoke.XXXXXX")"; snapshot="$work/snapshot.tsv"; if ! build_snapshot "$snapshot" "$work" "$label"; then rm -rf "$work"; return 1; fi; while IFS=$'\t' read -r name repo account id status busy has_gate demand; do [[ "$has_gate" == true ]] || continue; if ! remove_gate "$account" "$repo" "$id" "$label"; then warn "failed to revoke scheduler label from $name"; rc=1; fi; done <"$snapshot"; rm -rf "$work"; return "$rc"; }
+cmd_enable(){ local max="1" interval="$DEFAULT_INTERVAL" label="$DEFAULT_LABEL"; while [[ $# -gt 0 ]]; do case "$1" in --max-concurrency) max="${2:-}"; shift 2 ;; --interval) interval="${2:-}"; shift 2 ;; --label) label="${2:-}"; shift 2 ;; *) die "unknown scheduler enable option: $1" ;; esac; done; [[ "$max" =~ ^[1-9][0-9]*$ ]] || die "--max-concurrency must be a positive integer"; [[ "$interval" =~ ^[1-9][0-9]*$ ]] || die "--interval must be a positive integer"; [[ "$label" =~ ^[A-Za-z0-9._-]+$ ]] || die "--label must contain only letters, numbers, dot, underscore, or hyphen"; legacy_queue_enabled && die "legacy runnerctl queue gate is enabled; disable it before enabling scheduler"; need_gh; ensure_dirs; write_config true "$max" "$interval" "$label" false; if ! tick_once 0; then write_config false "$max" "$interval" "$label" false; die "initial scheduler reconciliation failed; scheduler remains disabled"; fi; start_controller; info "scheduler enabled (max_concurrency=$max interval=${interval}s label=$label)"; info "workflows must include '$label' in runs-on to be controlled"; }
+cmd_disable(){ local max interval label; max="$(max_concurrency)"; interval="$(poll_interval)"; label="$(gate_label)"; write_config false "$max" "$interval" "$label" false; stop_controller; if command -v gh >/dev/null 2>&1; then revoke_all_scheduler_labels || warn "some scheduler labels could not be revoked"; fi; info "scheduler disabled"; }
+cmd_drain(){ scheduler_enabled || die "scheduler is not enabled"; write_config true "$(max_concurrency)" "$(poll_interval)" "$(gate_label)" true; tick_once 0; info "scheduler draining; no new routing labels will be granted"; }
+cmd_resume(){ scheduler_enabled || die "scheduler is not enabled"; write_config true "$(max_concurrency)" "$(poll_interval)" "$(gate_label)" false; tick_once 0; info "scheduler resumed"; }
+cmd_run(){ scheduler_enabled || die "scheduler is not enabled"; ensure_dirs; local lock="$SCHED_DIR/controller.lock" existing=""; if ! mkdir "$lock" 2>/dev/null; then [[ -f "$lock/pid" ]] && existing="$(cat "$lock/pid" 2>/dev/null || true)"; if [[ "$existing" =~ ^[0-9]+$ ]] && kill -0 "$existing" 2>/dev/null; then die "scheduler controller is already running (pid $existing)"; fi; rm -rf "$lock"; mkdir "$lock"; fi; printf '%s\n' "$$" >"$lock/pid"; printf '%s\n' "$$" >"$PID_FILE"; trap 'rm -rf "$lock"; rm -f "$PID_FILE"' EXIT INT TERM; while scheduler_enabled; do if ! tick_once 0; then warn "scheduler tick failed; no additional capacity granted"; fi; sleep "$(poll_interval)"; done; }
+main(){ local cmd="${1:-help}" json=0; shift || true; case "$cmd" in status) [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "status accepts only --json"; print_status "$json" ;; enable) cmd_enable "$@" ;; disable) [[ $# -eq 0 ]] || die "disable takes no arguments"; cmd_disable ;; tick) [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "tick accepts only --json"; need_gh; tick_once "$json" ;; run) [[ $# -eq 0 ]] || die "run takes no arguments"; need_gh; cmd_run ;; drain) [[ $# -eq 0 ]] || die "drain takes no arguments"; need_gh; cmd_drain ;; resume) [[ $# -eq 0 ]] || die "resume takes no arguments"; need_gh; cmd_resume ;; help|--help|-h|"") usage ;; *) die "unknown scheduler command: $cmd" ;; esac; }
+main "$@"

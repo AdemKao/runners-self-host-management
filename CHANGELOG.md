@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-22
+
+### Added
+- `runnerctl scheduler` for GitHub-native queued-job semantics across runnerctl-managed repository runners.
+- Routing-label admission using the default `runnerctl-scheduled` custom label, with configurable `--label`, `--max-concurrency`, and polling interval.
+- Scheduler commands for `status`, `enable`, `disable`, `tick`, `run`, `drain`, and `resume`, including stable JSON output for status/tick.
+- Best-effort round-robin scheduling across managed repositories while preserving a host-wide concurrency limit.
+- Fail-closed reconciliation when runner state or queued-job state cannot be read completely from GitHub.
+- Dedicated scheduler architecture/migration guide and detailed v0.5.0 release notes.
+- Deterministic fake-GitHub regression coverage for routing-label grants/revocation, drain/resume, busy-runner safety, legacy-queue mutual exclusion, and API failure behavior.
+
+### Changed
+- `runnerctl queue` is now explicitly documented as the legacy v0.4 host-side admission gate. It remains supported for backwards compatibility but is no longer described as GitHub-native queueing.
+- Scheduled workflows must opt into the new scheduler by adding the configured routing label (default `runnerctl-scheduled`) to `runs-on`.
+- Shell, Homebrew, npm, and GitHub Release packaging now include the v0.5 scheduler plus internal v0.4.3 legacy implementations used by compatibility wrappers.
+- Scheduler control commands are serialized; manual `scheduler tick` is rejected while the background controller is active to prevent concurrent reconciliation.
+
+### Fixed
+- Jobs waiting for scheduler-controlled host capacity can remain in GitHub's `queued` state instead of being assigned first and waiting inside a pre-job hook as `in progress`.
+- The scheduler avoids spending a job's `timeout-minutes` budget on runnerctl-side capacity waiting because admission occurs through runner matching before GitHub assignment.
+
+### Compatibility / limitations
+- v0.5.0 scheduler supports runnerctl-managed **repository-level** runners. Organization/enterprise runner scheduling is future work.
+- Jobs without the scheduler routing label bypass scheduler concurrency control.
+- Polling is best-effort and is not strict global FIFO; a just-finished eligible runner can accept another job before the next poll.
+- `scheduler enable` starts a convenience background controller that is not reboot-persistent. Production hosts should supervise `runnerctl scheduler run` with a service manager.
+- Larger fleets should prefer GitHub `workflow_job` webhooks and/or runner scale-set tooling over aggressive polling.
+
 ## [0.4.3] - 2026-08-22
 
 ### Fixed
@@ -110,7 +138,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The project began with the initial `runnerctl` implementation for managing multiple GitHub Actions self-hosted runners on one host, including runner registration, service lifecycle management, logs, removal, environment diagnostics, installation tooling, CI, and local isolation guidance.
 
-[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.5.0
 [0.4.3]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.3
 [0.4.2]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.2
 [0.4.1]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.1

@@ -24,16 +24,24 @@ jobs:
         run: |
           bash -n runnerctl
           bash -n runnerctl-base
+          bash -n runnerctl-base-legacy
           bash -n bin/runnerctl
+          bash -n bin/runnerctl-legacy
           bash -n bin/runnerctl-cleanup
           bash -n bin/runnerctl-host
           bash -n bin/runnerctl-ci
           bash -n bin/runnerctl-hooks
           bash -n bin/runnerctl-queue
+          bash -n bin/runnerctl-queue-legacy
+          bash -n bin/runnerctl-scheduler
+          bash -n bin/runnerctl-scheduler-core
           bash -n install.sh
+          bash -n install-legacy.sh
           bash -n scripts/package-release.sh
           bash -n tests/smoke.sh
+          bash -n tests/smoke-legacy.sh
           bash -n tests/installer.sh
+          bash -n tests/scheduler.sh
           bash -n tests/launchd-status.sh
           bash -n tests/cleanup.sh
           bash -n tests/doctor.sh
@@ -45,8 +53,11 @@ jobs:
       - name: Run smoke tests
         run: bash tests/smoke.sh
 
-      - name: Run installer regression tests
+      - name: Run v0.5 installer regression tests
         run: bash tests/installer.sh
+
+      - name: Run GitHub-native scheduler regression tests
+        run: bash tests/scheduler.sh
 
       - name: Run cleanup regression tests
         run: bash tests/cleanup.sh
@@ -63,7 +74,7 @@ jobs:
       - name: Run hook composition regression tests
         run: bash tests/hooks.sh
 
-      - name: Run global queue regression tests
+      - name: Run legacy admission-gate regression tests
         run: bash tests/queue.sh
 
       - name: Validate npm package

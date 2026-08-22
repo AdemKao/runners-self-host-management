@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
+SCHED_DIR="$RUNNERCTL_HOME/scheduler"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCK_DIR="$SCHED_DIR/command.lock"
+find_core(){
+  local candidates=("${RUNNERCTL_SCHEDULER_CORE:-}" "$SCRIPT_DIR/runnerctl-scheduler-core" "$SCRIPT_DIR/../libexec/runnerctl-scheduler-core" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-scheduler-core") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  printf '[runnerctl-scheduler] ERROR: scheduler core not found; reinstall runnerctl\n' >&2; exit 1
+}
+controller_running(){ local pid=""; [[ -f "$SCHED_DIR/controller.pid" ]] && pid="$(cat "$SCHED_DIR/controller.pid" 2>/dev/null || true)"; [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; }
+acquire_command_lock(){
+  mkdir -p "$SCHED_DIR"
+  local existing=""
+  if mkdir "$LOCK_DIR" 2>/dev/null; then printf '%s\n' "$$" >"$LOCK_DIR/pid"; return 0; fi
+  [[ -f "$LOCK_DIR/pid" ]] && existing="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [[ "$existing" =~ ^[0-9]+$ ]] && ! kill -0 "$existing" 2>/dev/null; then rm -rf "$LOCK_DIR"; mkdir "$LOCK_DIR"; printf '%s\n' "$$" >"$LOCK_DIR/pid"; return 0; fi
+  printf '[runnerctl-scheduler] ERROR: another scheduler control command is running\n' >&2; return 1
+}
+release_command_lock(){ rm -rf "$LOCK_DIR" 2>/dev/null || true; }
+cmd="${1:-help}"
+case "$cmd" in
+  tick)
+    if controller_running && [[ "${RUNNERCTL_SCHEDULER_ALLOW_MANUAL_TICK:-0}" != 1 ]]; then
+      printf '[runnerctl-scheduler] ERROR: background controller is running; manual tick is disabled to prevent concurrent reconciliation. Stop/disable the controller or set RUNNERCTL_SCHEDULER_ALLOW_MANUAL_TICK=1 for supervised testing.\n' >&2
+      exit 1
+    fi
+    acquire_command_lock; trap release_command_lock EXIT INT TERM; bash "$(find_core)" "$@"
+    ;;
+  enable|disable|drain|resume)
+    acquire_command_lock; trap release_command_lock EXIT INT TERM; bash "$(find_core)" "$@"
+    ;;
+  *) exec bash "$(find_core)" "$@" ;;
+esac
