@@ -94,7 +94,11 @@ chmod +x "$tmp/bin/gh"
 
 run_scheduler(){ env PATH="$tmp/bin:$PATH" RUNNERCTL_HOME="$tmp/data" RUNNERCTL_SCHEDULER_TEST_TOKEN=fake RUNNERCTL_SCHEDULER_TEST_STATE="$tmp/state" RUNNERCTL_SCHEDULER_NO_BACKGROUND=1 bash "$ROOT/bin/runnerctl-scheduler" "$@"; }
 has_gate(){ local file="$1"; awk -F'\t' '$5 ~ /(^|,)runnerctl-scheduled(,|$)/ {found=1} END{exit found?0:1}' "$file"; }
-set_busy(){ local file="$1" value="$2" out="$file.tmp"; awk -F'\t' -v OFS='\t' -v value="$value" '{$4=value;print}' "$file" >"$out" && mv "$out" "$file"; }
+set_busy(){
+  local file="$1" value="$2" out
+  out="$file.tmp"
+  awk -F'\t' -v OFS='\t' -v value="$value" '{$4=value;print}' "$file" >"$out" && mv "$out" "$file"
+}
 
 # Disabled status is read-only and does not require GitHub API access.
 node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(0,"utf8"));if(x.enabled!==false)process.exit(1)' < <(run_scheduler status --json)
