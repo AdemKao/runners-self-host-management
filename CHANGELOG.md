@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-23
+
+### Added
+- `runnerctl bot` read-only query/controller commands for local status, diagnostics, Telegram long polling, and HTTP/LINE serving.
+- Fixed read-only remote commands for `status`, `runners`, `queue`, `scheduler`, `health`, and `help`.
+- Telegram Bot API inbound command support using `getUpdates` long polling, chat-ID allowlists, and persisted update offsets to avoid replay after restart.
+- Authenticated HTTP JSON endpoints for runner, queue, scheduler, and host-health queries, bound to `127.0.0.1` by default.
+- LINE Messaging API inbound webhook support with mandatory raw-body `x-line-signature` HMAC-SHA256 verification and user-ID allowlists.
+- Optional Python 3.8+ standard-library controller; all existing runnerctl features remain usable without Python.
+- systemd/launchd deployment guidance, reverse-proxy/TLS guidance, troubleshooting, rollback, and dedicated v0.7.0 release notes.
+- Deterministic controller tests covering fixed command routing, injection rejection, Telegram allowlists/offset persistence, HTTP bearer auth, remote-bind safeguards, LINE signature verification, and user allowlists.
+
+### Changed
+- Shell, Homebrew, npm, and GitHub Release packages now include the optional bot controller and its v0.6 compatibility frontend.
+- The v0.6 frontend remains an internal compatibility layer while v0.7 adds bot/API discoverability and version-aware upgrade behavior.
+
+### Security
+- Remote mutation is intentionally unavailable in v0.7.0. Bot/API clients cannot start, stop, remove, drain, resume, upgrade, or otherwise mutate runnerctl state.
+- Chat text is never interpolated into a shell command; only fixed read-only command names map to fixed runnerctl argument vectors.
+- Telegram inbound queries require an allowed chat ID.
+- LINE webhook requests are verified before JSON parsing, and valid senders must also be present in `RUNNERCTL_LINE_ALLOWED_USER_IDS`.
+- HTTP `/v1/*` queries require `RUNNERCTL_BOT_API_TOKEN`; token comparison is constant-time.
+- Non-loopback HTTP binding requires both `--allow-remote` and an API token. runnerctl does not provide TLS termination.
+- Inbound request bodies are limited to 64 KiB, and bot/controller status output reports credential presence without returning credential values.
+
+### Compatibility / limitations
+- Python 3.8+ is required only for `runnerctl bot ...`; it is not a general runnerctl dependency.
+- Telegram mode does not require a public listener because it uses long polling.
+- LINE inbound commands require a publicly reachable HTTPS webhook, normally provided by a trusted reverse proxy/tunnel in front of the loopback controller.
+- Remote mutating commands require a future authorization/audit model and are explicitly out of scope.
+
 ## [0.6.0] - 2026-08-23
 
 ### Added
@@ -169,7 +200,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The project began with the initial `runnerctl` implementation for managing multiple GitHub Actions self-hosted runners on one host, including runner registration, service lifecycle management, logs, removal, environment diagnostics, installation tooling, CI, and local isolation guidance.
 
-[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.0
 [0.6.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.6.0
 [0.5.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.5.0
 [0.4.3]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.3
