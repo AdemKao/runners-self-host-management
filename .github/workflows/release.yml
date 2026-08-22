@@ -9,6 +9,7 @@ on:
     paths:
       - 'runnerctl'
       - 'runnerctl-base'
+      - 'runnerctl-base-v06'
       - 'runnerctl-base-v05'
       - 'runnerctl-base-legacy'
       - 'bin/runnerctl'
@@ -23,10 +24,13 @@ on:
       - 'bin/runnerctl-scheduler-core'
       - 'bin/runnerctl-notify'
       - 'bin/runnerctl-notify-provider-*'
+      - 'bin/runnerctl-bot'
+      - 'bin/runnerctl-bot-controller.py'
       - 'package.json'
       - 'npm/**'
       - 'scripts/package-release.sh'
       - 'docs/notifications.md'
+      - 'docs/bot-controller.md'
       - 'docs/releases/**'
       - 'CHANGELOG.md'
       - 'AGENTS.md'
@@ -88,6 +92,7 @@ jobs:
           bash tests/installer.sh
           bash tests/scheduler.sh
           bash tests/notify.sh
+          python3 tests/test_bot_controller.py
 
       - name: Publish npm package
         id: npm_publish
@@ -143,6 +148,7 @@ jobs:
           gh release create "$tag" \
             dist/runnerctl dist/runnerctl.sha256 \
             dist/runnerctl-base dist/runnerctl-base.sha256 \
+            dist/runnerctl-base-v06 dist/runnerctl-base-v06.sha256 \
             dist/runnerctl-base-v05 dist/runnerctl-base-v05.sha256 \
             dist/runnerctl-base-legacy dist/runnerctl-base-legacy.sha256 \
             dist/runnerctl-core dist/runnerctl-core.sha256 \
@@ -159,6 +165,8 @@ jobs:
             dist/runnerctl-notify-provider-telegram dist/runnerctl-notify-provider-telegram.sha256 \
             dist/runnerctl-notify-provider-line dist/runnerctl-notify-provider-line.sha256 \
             dist/runnerctl-notify-provider-webhook dist/runnerctl-notify-provider-webhook.sha256 \
+            dist/runnerctl-bot dist/runnerctl-bot.sha256 \
+            dist/runnerctl-bot-controller.py dist/runnerctl-bot-controller.py.sha256 \
             dist/runnerctl-*.tar.gz dist/runnerctl-*.tar.gz.sha256 \
             --title "runnerctl $tag" "${notes_args[@]}" "${target_args[@]}"
 
