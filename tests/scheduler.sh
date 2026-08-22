@@ -142,8 +142,11 @@ if RUNNERCTL_SCHEDULER_TEST_FAIL_REPO=example-org/repo-a run_scheduler enable --
 ! has_gate "$tmp/state/runners_example-org_repo-a.tsv"; ! has_gate "$tmp/state/runners_example-org_repo-b.tsv"
 node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(0,"utf8"));if(x.enabled!==false)process.exit(1)' < <(run_scheduler status --json)
 
-# Legacy queue help must clearly distinguish admission gating from GitHub-native queueing.
-bash "$ROOT/bin/runnerctl-queue" --help | grep -q 'Legacy host-side admission gate'
-bash "$ROOT/bin/runnerctl-scheduler" --help | grep -q 'Jobs stay GitHub "queued"'
+# Help assertions must not use grep -q directly on a producer under pipefail:
+# grep may exit as soon as it finds the match, causing the producer to receive SIGPIPE.
+bash "$ROOT/bin/runnerctl-queue" --help >"$tmp/queue-help.out"
+grep -q 'Legacy host-side admission gate' "$tmp/queue-help.out"
+bash "$ROOT/bin/runnerctl-scheduler" --help >"$tmp/scheduler-help.out"
+grep -q 'Jobs stay GitHub "queued"' "$tmp/scheduler-help.out"
 
 echo "scheduler tests passed"
