@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-23
+
+### Added
+- `runnerctl notify` commands for provider discovery, configuration/status inspection, test delivery, manual event emission, and per-runner job notifications.
+- Built-in Telegram Bot API, LINE Messaging API, and generic JSON webhook notification providers.
+- Executable custom notification providers under `$RUNNERCTL_HOME/plugins/notify/` using a stable stdin JSON event contract.
+- Per-runner `job.started` and `job.completed` notifications composed through the existing shared runner hook dispatcher.
+- Scheduler control-plane notification events for enable, disable, drain, resume, and command errors.
+- Stable notification event schema with host, runner, repository, run, workflow, job, URL, timestamp, and message metadata.
+- Comprehensive notification/provider documentation and dedicated v0.6.0 release notes.
+- Deterministic fake-curl/provider tests covering Telegram, LINE, webhook payloads, plugin delivery, secret redaction, hook composition, and provider failure behavior.
+
+### Changed
+- Shell, Homebrew, npm, and GitHub Release packaging now include the notification dispatcher and built-in providers.
+- The v0.5 frontend is retained as an internal compatibility layer while the v0.6 frontend adds notification discoverability and version-aware upgrade behavior.
+- Scheduler control commands emit best-effort notification events without changing scheduler command success/failure semantics.
+
+### Security
+- Provider credentials are read from environment variables rather than normal runnerctl config or positional CLI arguments.
+- `notify status` / `notify providers` expose only configured/not-configured state and never intentionally return Telegram tokens, LINE channel tokens, or webhook authorization values.
+- Built-in providers pass authorization material to curl through config stdin instead of command-line arguments.
+
+### Reliability
+- Job-hook notification delivery is fail-open so notification outages do not fail CI jobs.
+- Built-in providers use bounded network timeouts; hook delivery performs one attempt while manual test/emit commands may retry once and return non-zero for operator diagnostics.
+
+### Compatibility / limitations
+- `job.completed` means the GitHub runner completion hook executed; v0.6.0 does not guess the final GitHub job conclusion.
+- Exact succeeded/failed notifications require a future GitHub `workflow_job` webhook/event-controller integration.
+- Telegram/LINE inbound bot commands such as `/status` are intentionally not included in v0.6.0 because they require a persistent authenticated bot/API controller, long polling or public webhooks, authorization, and replay/rate-limit protections.
+
 ## [0.5.0] - 2026-08-22
 
 ### Added
@@ -138,7 +169,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The project began with the initial `runnerctl` implementation for managing multiple GitHub Actions self-hosted runners on one host, including runner registration, service lifecycle management, logs, removal, environment diagnostics, installation tooling, CI, and local isolation guidance.
 
-[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.6.0
 [0.5.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.5.0
 [0.4.3]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.3
 [0.4.2]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.4.2
