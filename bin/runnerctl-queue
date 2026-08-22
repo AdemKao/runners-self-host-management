@@ -3,9 +3,20 @@ set -euo pipefail
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 find_legacy(){
-  local candidates=("${RUNNERCTL_QUEUE_LEGACY_HELPER:-}" "$SCRIPT_DIR/runnerctl-queue-legacy" "$SCRIPT_DIR/../libexec/runnerctl-queue-legacy" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-queue-legacy") candidate
-  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
-  printf 'runnerctl-queue: legacy queue helper not found; reinstall runnerctl\n' >&2; exit 1
+  local candidates=(
+    "${RUNNERCTL_QUEUE_LEGACY_HELPER:-}"
+    "$SCRIPT_DIR/runnerctl-queue-legacy"
+    "$SCRIPT_DIR/../runnerctl-queue-legacy"
+    "$SCRIPT_DIR/../libexec/runnerctl-queue-legacy"
+    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-queue-legacy"
+  ) candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -f "$candidate" ]] || continue
+    printf '%s' "$candidate"
+    return
+  done
+  printf 'runnerctl-queue: legacy queue helper not found; reinstall runnerctl\n' >&2
+  exit 1
 }
 scheduler_enabled(){ local f="$RUNNERCTL_HOME/scheduler/config"; [[ -f "$f" ]] || return 1; [[ "$(awk -F= '$1=="enabled"{print $2;exit}' "$f" 2>/dev/null || true)" == true ]]; }
 case "${1:-}" in
