@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+TOKEN="${RUNNERCTL_LINE_CHANNEL_ACCESS_TOKEN:-}"
+TO="${RUNNERCTL_LINE_TO:-}"
+MESSAGE="${RUNNERCTL_NOTIFY_MESSAGE:-}"
+CURL_BIN="${RUNNERCTL_CURL_BIN:-curl}"
+[[ -n "$TOKEN" && -n "$TO" ]] || { printf 'line provider is not configured\n' >&2; exit 2; }
+command -v "$CURL_BIN" >/dev/null 2>&1 || { printf 'line provider requires curl\n' >&2; exit 2; }
+cat >/dev/null
+json_quote(){ local v="${1:-}"; v="${v//\\/\\\\}"; v="${v//\"/\\\"}"; v="${v//$'\n'/\\n}"; v="${v//$'\r'/\\r}"; v="${v//$'\t'/\\t}"; printf '"%s"' "$v"; }
+payload="{\"to\":$(json_quote "$TO"),\"messages\":[{\"type\":\"text\",\"text\":$(json_quote "$MESSAGE")}]}"
+{
+  printf 'url = "https://api.line.me/v2/bot/message/push"\n'
+  printf 'request = "POST"\n'
+  printf 'header = "Content-Type: application/json"\n'
+  printf 'header = "Authorization: Bearer %s"\n' "$TOKEN"
+} | "$CURL_BIN" -sS --fail --connect-timeout "${RUNNERCTL_NOTIFY_CONNECT_TIMEOUT:-2}" --max-time "${RUNNERCTL_NOTIFY_TOTAL_TIMEOUT:-4}" --config - \
+  --data-binary "$payload" >/dev/null
