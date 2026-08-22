@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+find_controller(){
+  local candidates=(
+    "${RUNNERCTL_BOT_CONTROLLER:-}"
+    "$SCRIPT_DIR/runnerctl-bot-controller.py"
+    "$SCRIPT_DIR/../libexec/runnerctl-bot-controller.py"
+    "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-bot-controller.py"
+  ) c
+  for c in "${candidates[@]}"; do
+    [[ -n "$c" && -f "$c" ]] || continue
+    printf '%s' "$c"
+    return 0
+  done
+  printf 'runnerctl: bot controller not found. Reinstall runnerctl.\n' >&2
+  exit 1
+}
+
+command -v python3 >/dev/null 2>&1 || {
+  printf 'runnerctl: python3 is required for bot/API controller commands.\n' >&2
+  exit 1
+}
+
+if [[ -z "${RUNNERCTL_BOT_RUNNERCTL:-}" ]]; then
+  if [[ -f "$SCRIPT_DIR/../runnerctl" ]]; then
+    export RUNNERCTL_BOT_RUNNERCTL="$SCRIPT_DIR/../runnerctl"
+  elif command -v runnerctl >/dev/null 2>&1; then
+    export RUNNERCTL_BOT_RUNNERCTL="$(command -v runnerctl)"
+  fi
+fi
+
+exec python3 "$(find_controller)" "$@"
