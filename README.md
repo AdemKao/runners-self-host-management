@@ -7,7 +7,7 @@
 
 `runnerctl` is an open-source CLI for managing multiple GitHub Actions self-hosted runners on a single macOS or Linux host.
 
-It automates runner registration, background services, logs, multi-account GitHub authentication, upgrades, and agent-friendly discovery.
+It automates runner registration, background services, logs, multi-account GitHub authentication, upgrades, scheduling, notifications, and agent-friendly discovery.
 
 ## Highlights
 
@@ -17,6 +17,9 @@ It automates runner registration, background services, logs, multi-account GitHu
 - Support multiple GitHub CLI accounts and repository-to-account mappings.
 - Start, stop, restart, inspect, and remove runners.
 - Read runner and workflow worker logs.
+- GitHub-native queued-job scheduling with host-wide concurrency limits.
+- Outbound Telegram, LINE, webhook, and executable-plugin notifications.
+- Optional read-only Telegram / LINE / HTTP API controller for remote status queries.
 - Stripe-style `COMMAND --help` discovery.
 - AI-agent contract via `runnerctl agent` and `runnerctl agent --json`.
 - Stable JSON for read-only discovery commands.
@@ -34,6 +37,8 @@ It automates runner registration, background services, logs, multi-account GitHu
 - repository admin permission where a runner is registered
 
 Node.js is only required for npm/pnpm installation. Linux service operations may require `sudo`.
+
+**Python 3.8+ is optional and is required only for `runnerctl bot ...` Telegram/LINE/HTTP controller commands.** Other runnerctl features do not require Python.
 
 ## Installation
 
@@ -174,12 +179,77 @@ jobs:
 
 One runner process executes one job at a time. Two idle runner instances can run two matching jobs concurrently.
 
+## Scheduling, notifications, and remote read-only queries
+
+These are separate layers:
+
+```text
+runnerctl scheduler
+  GitHub-native queued-job admission and host concurrency
+
+runnerctl notify
+  runnerctl -> Telegram / LINE / webhook / custom provider
+
+runnerctl bot
+  Telegram / LINE / authenticated HTTP client -> read-only runnerctl query
+```
+
+Scheduler details: [docs/scheduler.md](docs/scheduler.md)
+
+Notification/provider setup: [docs/notifications.md](docs/notifications.md)
+
+Read-only Bot/API setup and security: [docs/bot-controller.md](docs/bot-controller.md)
+
+### Read-only Bot/API examples
+
+Inspect local controller readiness without printing secrets:
+
+```bash
+runnerctl bot doctor --json
+```
+
+Run a fixed local query:
+
+```bash
+runnerctl bot query status --json
+```
+
+Telegram uses long polling and does not need a public listener:
+
+```bash
+export RUNNERCTL_TELEGRAM_BOT_TOKEN='...'
+export RUNNERCTL_TELEGRAM_ALLOWED_CHAT_IDS='123456789'
+runnerctl bot telegram run
+```
+
+Supported Telegram/LINE commands are read-only:
+
+```text
+/status
+/runners
+/queue
+/scheduler
+/health
+/help
+```
+
+Start the authenticated local HTTP API / LINE webhook listener:
+
+```bash
+export RUNNERCTL_BOT_API_TOKEN='use-a-long-random-value'
+runnerctl bot serve --bind 127.0.0.1 --port 8765
+```
+
+HTTP `/v1/*` queries require a bearer token. LINE additionally requires `RUNNERCTL_LINE_CHANNEL_SECRET` signature verification and an allowed LINE user ID. The controller binds to loopback by default, does not provide TLS termination, and intentionally exposes **no remote mutating commands** in v0.7.0.
+
 ## Discoverable help
 
 ```bash
 runnerctl --help
 runnerctl add --help
 runnerctl auth --help
+runnerctl notify --help
+runnerctl bot --help
 runnerctl upgrade --help
 runnerctl remove --help
 runnerctl help add
@@ -208,6 +278,7 @@ runnerctl doctor --json
 runnerctl auth list --json
 runnerctl auth mappings --json
 runnerctl list --json
+runnerctl bot doctor --json
 runnerctl upgrade --check --json
 runnerctl auth resolve example-org/example-repo --json
 runnerctl add --help
@@ -235,6 +306,9 @@ runnerctl auth status --json
 runnerctl auth doctor --json
 runnerctl auth mappings --json
 runnerctl auth resolve example-org/example-repo --json
+runnerctl notify status --json
+runnerctl bot doctor --json
+runnerctl bot query status --json
 runnerctl upgrade --check --json
 ```
 
@@ -314,7 +388,12 @@ Homebrew installs generated Bash, Zsh, and Fish completions automatically.
 
 ```text
 ~/.local/share/runnerctl/
+├── bot/
+│   └── telegram.offset
 ├── cache/
+├── notify/
+├── plugins/
+│   └── notify/
 └── runners/
     └── example-runner-01/
         ├── .runnerctl-meta
@@ -343,27 +422,25 @@ Self-hosted runners execute workflow code directly on the host. Attach only trus
 
 Registration/removal tokens are requested only when needed and are not persisted in runnerctl mappings or metadata.
 
-See [SECURITY.md](SECURITY.md).
+Bot/API credentials are environment-based and remote query commands are read-only in v0.7.0. Keep the HTTP controller on loopback/private networking unless you intentionally put it behind trusted HTTPS and authentication.
+
+See [SECURITY.md](SECURITY.md) and [docs/bot-controller.md](docs/bot-controller.md).
 
 ## Release and distribution
 
-A new CLI/package version merged to `main` triggers the release workflow when no release for that version exists. It validates CLI/package version consistency, runs tests, and creates:
+A new CLI/package version merged to `main` triggers the release workflow when no release for that version exists. It validates CLI/package version consistency, runs tests, and creates standalone artifacts plus SHA-256 manifests and a source-compatible tarball.
 
-```text
-runnerctl
-runnerctl.sha256
-runnerctl-core
-runnerctl-core.sha256
-runnerctl-X.Y.Z.tar.gz
-runnerctl-X.Y.Z.tar.gz.sha256
-```
+If `NPM_TOKEN` is configured, the npm package is published too. npm publication failure does not prevent the GitHub Release from being created.
 
-If `NPM_TOKEN` is configured, the npm package is published too.
+Release history: [CHANGELOG.md](CHANGELOG.md)
 
 ## Development
 
 ```bash
 bash tests/smoke.sh
+bash tests/scheduler.sh
+bash tests/notify.sh
+python3 tests/test_bot_controller.py
 npm pack --dry-run
 ruby -c Formula/runnerctl.rb
 ```
@@ -374,7 +451,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 
 - Organization-level runner pools and runner groups.
 - GitHub-side online/busy health reporting.
-- Host-level concurrency/resource limits.
+- Persistent service helpers for scheduler/bot controllers.
+- Audited permission model for future remote operator actions.
 - Stable versioned Homebrew formula generated from releases.
 - Debian (`.deb`) and RPM packages.
 - Richer completion for runner/account names.
