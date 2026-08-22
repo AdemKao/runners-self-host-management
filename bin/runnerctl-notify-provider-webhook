@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+URL="${RUNNERCTL_WEBHOOK_URL:-}"
+AUTH_HEADER="${RUNNERCTL_WEBHOOK_AUTH_HEADER:-}"
+CURL_BIN="${RUNNERCTL_CURL_BIN:-curl}"
+[[ -n "$URL" ]] || { printf 'webhook provider is not configured\n' >&2; exit 2; }
+command -v "$CURL_BIN" >/dev/null 2>&1 || { printf 'webhook provider requires curl\n' >&2; exit 2; }
+payload="$(cat)"
+{
+  printf 'url = "%s"\n' "$URL"
+  printf 'request = "POST"\n'
+  printf 'header = "Content-Type: application/json"\n'
+  [[ -z "$AUTH_HEADER" ]] || printf 'header = "%s"\n' "$AUTH_HEADER"
+} | "$CURL_BIN" -sS --fail --connect-timeout "${RUNNERCTL_NOTIFY_CONNECT_TIMEOUT:-2}" --max-time "${RUNNERCTL_NOTIFY_TOTAL_TIMEOUT:-4}" --config - \
+  --data-binary "$payload" >/dev/null

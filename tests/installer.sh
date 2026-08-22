@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="0.5.0"
+VERSION="0.6.0"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 DIST_DIR="$tmp/dist" bash "$ROOT/scripts/package-release.sh" >/dev/null
@@ -34,11 +34,22 @@ PATH="$tmp/bin:$PATH" RUNNERCTL_TEST_SOURCE_ROOT="$ROOT" RUNNERCTL_TEST_DIST="$t
 [[ ! -s "$tmp/install.err" ]]
 cli="$tmp/prefix/bin/runnerctl"; lib="$tmp/prefix/libexec/runnerctl"
 [[ "$($cli version)" == "$VERSION" ]]
-for f in runnerctl-base runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core; do [[ -x "$lib/$f" ]] || { echo "missing installed component: $f" >&2; exit 1; }; done
+for f in runnerctl-base runnerctl-base-v05 runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook; do
+  [[ -x "$lib/$f" ]] || { echo "missing installed component: $f" >&2; exit 1; }
+done
 node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(0,"utf8"));if(x.enabled!==false)process.exit(1)' < <("$cli" scheduler status --json)
-"$cli" scheduler --help | grep -q 'runnerctl-scheduled'
-"$cli" queue --help | grep -q 'Legacy host-side admission gate'
-"$cli" --help | grep -q 'GitHub-native scheduling'
-for artifact in runnerctl runnerctl-base runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core "runnerctl-$VERSION.tar.gz"; do [[ -f "$tmp/dist/$artifact.sha256" ]] || { echo "missing checksum: $artifact" >&2; exit 1; }; done
-if command -v sha256sum >/dev/null 2>&1; then (cd "$tmp/dist" && sha256sum -c ./*.sha256 >/dev/null); else for f in "$tmp/dist"/*.sha256; do (cd "$tmp/dist" && shasum -a 256 -c "$(basename "$f")" >/dev/null); done; fi
-echo "v0.5 installer tests passed"
+"$cli" scheduler --help >"$tmp/scheduler-help"; grep -q 'runnerctl-scheduled' "$tmp/scheduler-help"
+"$cli" queue --help >"$tmp/queue-help"; grep -q 'Legacy host-side admission gate' "$tmp/queue-help"
+"$cli" notify --help >"$tmp/notify-help"; grep -q 'Notification integrations and provider plugins' "$tmp/notify-help"
+"$cli" notify providers --json | node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(0,"utf8"));if(!x.find(p=>p.name==="telegram")||!x.find(p=>p.name==="line")||!x.find(p=>p.name==="webhook"))process.exit(1)'
+"$cli" --help >"$tmp/root-help"; grep -q 'GitHub-native scheduling' "$tmp/root-help"; grep -q 'Notifications and integrations' "$tmp/root-help"
+RUNNERCTL_LATEST_VERSION="$VERSION" RUNNERCTL_INSTALL_METHOD=shell "$cli" upgrade --check --json | node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(0,"utf8"));if(x.current_version!=="0.6.0"||x.update_available)process.exit(1)'
+for artifact in runnerctl runnerctl-base runnerctl-base-v05 runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook "runnerctl-$VERSION.tar.gz"; do
+  [[ -f "$tmp/dist/$artifact.sha256" ]] || { echo "missing checksum: $artifact" >&2; exit 1; }
+done
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$tmp/dist" && sha256sum -c ./*.sha256 >/dev/null)
+else
+  for f in "$tmp/dist"/*.sha256; do (cd "$tmp/dist" && shasum -a 256 -c "$(basename "$f")" >/dev/null); done
+fi
+echo "v0.6 installer tests passed"

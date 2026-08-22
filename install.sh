@@ -13,8 +13,14 @@ cleanup(){ [[ -z "${TMP_DIR:-}" ]] || rm -rf -- "$TMP_DIR"; TMP_DIR=""; }
 trap cleanup EXIT
 verify_sha256(){ local dir="$1" manifest="$2"; if command -v sha256sum >/dev/null 2>&1; then (cd "$dir" && sha256sum -c "$manifest"); elif command -v shasum >/dev/null 2>&1; then (cd "$dir" && shasum -a 256 -c "$manifest"); else die "sha256sum or shasum is required to verify release artifacts"; fi; }
 download_verified(){ local base="$1" name="$2" tmp="$3"; curl -fsSL "$base/$name" -o "$tmp/$name"; curl -fsSL "$base/$name.sha256" -o "$tmp/$name.sha256"; verify_sha256 "$tmp" "$name.sha256"; }
-install_extra(){ local source="$1" name="$2"; [[ -f "$source" ]] || die "missing v0.5 component: $source"; mkdir -p "$LIBEXEC_DIR"; install -m 0755 "$source" "$LIBEXEC_DIR/$name"; }
-local_checkout_ready(){ [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install-legacy.sh" && -f "$SCRIPT_DIR/runnerctl-base-legacy" && -f "$SCRIPT_DIR/bin/runnerctl-legacy" && -f "$SCRIPT_DIR/bin/runnerctl-queue-legacy" && -f "$SCRIPT_DIR/bin/runnerctl-scheduler" && -f "$SCRIPT_DIR/bin/runnerctl-scheduler-core" ]]; }
+install_extra(){ local source="$1" name="$2"; [[ -f "$source" ]] || die "missing v0.6 component: $source"; mkdir -p "$LIBEXEC_DIR"; install -m 0755 "$source" "$LIBEXEC_DIR/$name"; }
+local_checkout_ready(){
+  [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install-legacy.sh" && -f "$SCRIPT_DIR/runnerctl-base-v05" && -f "$SCRIPT_DIR/runnerctl-base-legacy" && \
+     -f "$SCRIPT_DIR/bin/runnerctl-legacy" && -f "$SCRIPT_DIR/bin/runnerctl-queue-legacy" && -f "$SCRIPT_DIR/bin/runnerctl-scheduler" && \
+     -f "$SCRIPT_DIR/bin/runnerctl-scheduler-core" && -f "$SCRIPT_DIR/bin/runnerctl-notify" && \
+     -f "$SCRIPT_DIR/bin/runnerctl-notify-provider-telegram" && -f "$SCRIPT_DIR/bin/runnerctl-notify-provider-line" && \
+     -f "$SCRIPT_DIR/bin/runnerctl-notify-provider-webhook" ]]
+}
 fetch_legacy_installer(){
   local target="$1"
   if local_checkout_ready; then printf '%s' "$SCRIPT_DIR/install-legacy.sh"; return; fi
@@ -22,27 +28,40 @@ fetch_legacy_installer(){
   if [[ -n "${RUNNERCTL_VERSION:-}" ]]; then curl -fsSL "https://raw.githubusercontent.com/$REPO/v${RUNNERCTL_VERSION}/install-legacy.sh" -o "$target"; else curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/install-legacy.sh" -o "$target"; fi
   printf '%s' "$target"
 }
-install_v05_components(){
-  local tmp="$1" base
+install_v06_components(){
+  local tmp="$1" base name
+  local names=(runnerctl-base-v05 runnerctl-base-legacy runnerctl-core-legacy runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook)
   if local_checkout_ready; then
+    install_extra "$SCRIPT_DIR/runnerctl-base-v05" runnerctl-base-v05
     install_extra "$SCRIPT_DIR/runnerctl-base-legacy" runnerctl-base-legacy
     install_extra "$SCRIPT_DIR/bin/runnerctl-legacy" runnerctl-core-legacy
     install_extra "$SCRIPT_DIR/bin/runnerctl-queue-legacy" runnerctl-queue-legacy
     install_extra "$SCRIPT_DIR/bin/runnerctl-scheduler" runnerctl-scheduler
     install_extra "$SCRIPT_DIR/bin/runnerctl-scheduler-core" runnerctl-scheduler-core
-    return
-  fi
-  if [[ -n "${RUNNERCTL_VERSION:-}" ]]; then
+    install_extra "$SCRIPT_DIR/bin/runnerctl-notify" runnerctl-notify
+    install_extra "$SCRIPT_DIR/bin/runnerctl-notify-provider-telegram" runnerctl-notify-provider-telegram
+    install_extra "$SCRIPT_DIR/bin/runnerctl-notify-provider-line" runnerctl-notify-provider-line
+    install_extra "$SCRIPT_DIR/bin/runnerctl-notify-provider-webhook" runnerctl-notify-provider-webhook
+  elif [[ -n "${RUNNERCTL_VERSION:-}" ]]; then
     base="https://github.com/$REPO/releases/download/v${RUNNERCTL_VERSION}"
-    for name in runnerctl-base-legacy runnerctl-core-legacy runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core; do download_verified "$base" "$name" "$tmp"; install_extra "$tmp/$name" "$name"; done
+    for name in "${names[@]}"; do download_verified "$base" "$name" "$tmp"; install_extra "$tmp/$name" "$name"; done
   else
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/runnerctl-base-v05" -o "$tmp/runnerctl-base-v05"
     curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/runnerctl-base-legacy" -o "$tmp/runnerctl-base-legacy"
     curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-legacy" -o "$tmp/runnerctl-core-legacy"
     curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-queue-legacy" -o "$tmp/runnerctl-queue-legacy"
     curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-scheduler" -o "$tmp/runnerctl-scheduler"
     curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-scheduler-core" -o "$tmp/runnerctl-scheduler-core"
-    for name in runnerctl-base-legacy runnerctl-core-legacy runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core; do install_extra "$tmp/$name" "$name"; done
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-notify" -o "$tmp/runnerctl-notify"
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-notify-provider-telegram" -o "$tmp/runnerctl-notify-provider-telegram"
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-notify-provider-line" -o "$tmp/runnerctl-notify-provider-line"
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-notify-provider-webhook" -o "$tmp/runnerctl-notify-provider-webhook"
+    for name in "${names[@]}"; do install_extra "$tmp/$name" "$name"; done
   fi
+  mkdir -p "$LIBEXEC_DIR/bin"
+  for name in runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook; do
+    ln -sf "../$name" "$LIBEXEC_DIR/bin/$name"
+  done
 }
 main(){
   command -v install >/dev/null 2>&1 || die "install command is required"
@@ -50,9 +69,9 @@ main(){
   local legacy
   legacy="$(fetch_legacy_installer "$TMP_DIR/install-legacy.sh")"
   RUNNERCTL_REPO="$REPO" RUNNERCTL_REF="$REF" RUNNERCTL_VERSION="${RUNNERCTL_VERSION:-}" PREFIX="$PREFIX" bash "$legacy"
-  install_v05_components "$TMP_DIR"
+  install_v06_components "$TMP_DIR"
   cleanup
-  info "Installed v0.5 scheduler components to $LIBEXEC_DIR"
-  printf '\nScheduler migration:\n  1. runnerctl queue disable      # if legacy gate is enabled\n  2. add runnerctl-scheduled to scheduled jobs runs-on labels\n  3. runnerctl scheduler enable --max-concurrency 1\n  4. runnerctl scheduler status\n'
+  info "Installed v0.6 notification and scheduler components to $LIBEXEC_DIR"
+  printf '\nNotification setup:\n  runnerctl notify providers\n  runnerctl notify test --provider telegram\n  runnerctl notify enable RUNNER --events job.started,job.completed\n\nSee docs/notifications.md for Telegram, LINE, webhook, plugin, secret, and troubleshooting guidance.\n'
 }
 main "$@"
