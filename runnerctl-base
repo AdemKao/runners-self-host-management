@@ -1,66 +1,62 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.5.0"
+VERSION="0.6.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNERCTL_REPO="${RUNNERCTL_REPO:-AdemKao/runners-self-host-management}"
 
-find_legacy(){
-  local candidates=("${RUNNERCTL_BASE_LEGACY:-}" "$SCRIPT_DIR/runnerctl-base-legacy" "$SCRIPT_DIR/../libexec/runnerctl-base-legacy" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-base-legacy") candidate
+find_v05(){
+  local candidates=("${RUNNERCTL_BASE_V05:-}" "$SCRIPT_DIR/runnerctl-base-v05" "$SCRIPT_DIR/../libexec/runnerctl-base-v05" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-base-v05") candidate
   for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
-  printf 'runnerctl: legacy frontend base not found. Reinstall runnerctl.\n' >&2; exit 1
+  printf 'runnerctl: v0.5 compatibility frontend not found. Reinstall runnerctl.\n' >&2; exit 1
 }
-find_scheduler(){
-  local candidates=("${RUNNERCTL_SCHEDULER_HELPER:-}" "$SCRIPT_DIR/bin/runnerctl-scheduler" "$SCRIPT_DIR/runnerctl-scheduler" "$SCRIPT_DIR/../libexec/runnerctl-scheduler" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-scheduler") candidate
+find_notify(){
+  local candidates=("${RUNNERCTL_NOTIFY_HELPER:-}" "$SCRIPT_DIR/bin/runnerctl-notify" "$SCRIPT_DIR/runnerctl-notify" "$SCRIPT_DIR/../libexec/runnerctl-notify" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-notify") candidate
   for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
-  printf 'runnerctl: scheduler helper not found. Reinstall runnerctl.\n' >&2; exit 1
+  printf 'runnerctl: notification helper not found. Reinstall runnerctl.\n' >&2; exit 1
 }
-find_queue(){
-  local candidates=("${RUNNERCTL_QUEUE_HELPER:-}" "$SCRIPT_DIR/bin/runnerctl-queue" "$SCRIPT_DIR/runnerctl-queue" "$SCRIPT_DIR/../libexec/runnerctl-queue" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-queue") candidate
-  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
-  return 1
-}
-legacy(){ bash "$(find_legacy)" "$@"; }
-append_scheduler_help(){ cat <<'EOF'
+v05(){ bash "$(find_v05)" "$@"; }
 
-GitHub-native scheduling:
-  scheduler      Keep scheduled jobs in GitHub's queued state until host
-                 capacity is available by granting a routing label.
+append_notify_help(){ cat <<'EOF'
 
-Migration:
-  Add `runnerctl-scheduled` to scheduled jobs:
-    runs-on: [self-hosted, linux, x64, runnerctl-scheduled]
+Notifications and integrations:
+  notify         Send runner/job/scheduler events to Telegram, LINE, webhooks,
+                 or executable provider plugins.
 
-The v0.4.x `queue` command remains available as a legacy host-side admission
-gate. It is not GitHub-native queueing and waiting there can consume part of a
-job's timeout-minutes budget.
+Common commands:
+  runnerctl notify status --json
+  runnerctl notify providers
+  runnerctl notify test --provider telegram
+  runnerctl notify enable RUNNER --events job.started,job.completed
+
+Secrets are read from environment variables and are never printed by status.
+Use `runnerctl notify --help` for provider setup and plugin details.
 EOF
 }
-append_scheduler_agent(){ cat <<'EOF'
+append_notify_agent(){ cat <<'EOF'
 
-GitHub-native scheduler:
-  scheduler status       read-only scheduler and queued-demand inspection
-  scheduler enable       enables label-gated GitHub-native scheduling
-  scheduler disable      disables scheduling and revokes scheduler labels
-  scheduler tick         one-shot reconciliation
-  scheduler drain        stops granting new capacity; running jobs continue
-  scheduler resume       resumes capacity grants
+Notifications:
+  notify status       read-only notification/provider inspection
+  notify providers    read-only provider discovery
+  notify test         sends an external test notification
+  notify emit         sends an external event notification
+  notify enable       mutates local runner hooks/config and may restart service
+  notify disable      removes notification hooks/config and may restart service
 
-Scheduled workflows MUST request the configured routing label. Jobs without the
-label bypass the scheduler. Prefer scheduler over the legacy queue gate when
-GitHub queued/in_progress semantics and timeout-minutes accuracy matter.
+Hook-driven delivery is fail-open: an unavailable notification provider must not
+make a GitHub Actions job fail. Manual test/emit commands fail when delivery fails.
 EOF
 }
 agent_json(){
-  legacy agent --json | sed "s/\"version\": \"0\.4\.3\"/\"version\": \"$VERSION\"/" | awk '
-    /"queue resume":/ && !added {
+  v05 agent --json | sed "s/\"version\": \"0\.5\.0\"/\"version\": \"$VERSION\"/" | awk '
+    /"scheduler resume":/ && !added {
       print
-      print "    \"scheduler status\": {\"effect\": \"read-only-network\", \"json\": true},"
-      print "    \"scheduler enable\": {\"effect\": \"mutating-github-runner-labels-and-local-controller\"},"
-      print "    \"scheduler disable\": {\"effect\": \"mutating-github-runner-labels-and-local-controller\"},"
-      print "    \"scheduler tick\": {\"effect\": \"mutating-github-runner-labels\", \"json\": true},"
-      print "    \"scheduler drain\": {\"effect\": \"mutating-local-config-and-github-runner-labels\"},"
-      print "    \"scheduler resume\": {\"effect\": \"mutating-local-config-and-github-runner-labels\"},"
+      print "    \"notify status\": {\"effect\": \"read-only-local\", \"json\": true},"
+      print "    \"notify providers\": {\"effect\": \"read-only-local\", \"json\": true},"
+      print "    \"notify test\": {\"effect\": \"external-notification\"},"
+      print "    \"notify emit\": {\"effect\": \"external-notification\"},"
+      print "    \"notify enable\": {\"effect\": \"mutating-local-hooks-and-service\"},"
+      print "    \"notify disable\": {\"effect\": \"mutating-local-hooks-and-service\"},"
       added=1; next
     }
     { print }
@@ -70,24 +66,24 @@ completion(){
   local shell="${1:-}"
   case "$shell" in
     bash)
-      legacy completion bash | sed 's/capacity queue upgrade/capacity queue scheduler upgrade/'
+      v05 completion bash | sed 's/capacity queue scheduler upgrade/capacity queue notify scheduler upgrade/'
       cat <<'EOF'
-_runnerctl_scheduler_complete() {
-  if [[ "${COMP_WORDS[1]:-}" == "scheduler" && ${COMP_CWORD} -eq 2 ]]; then
-    COMPREPLY=( $(compgen -W "status enable disable tick run drain resume" -- "${COMP_WORDS[COMP_CWORD]}") )
+_runnerctl_notify_complete() {
+  if [[ "${COMP_WORDS[1]:-}" == "notify" && ${COMP_CWORD} -eq 2 ]]; then
+    COMPREPLY=( $(compgen -W "status providers test emit enable disable" -- "${COMP_WORDS[COMP_CWORD]}") )
   else
-    _runnerctl_complete "$@"
+    _runnerctl_scheduler_complete "$@"
   fi
 }
-complete -F _runnerctl_scheduler_complete runnerctl
+complete -F _runnerctl_notify_complete runnerctl
 EOF
       ;;
-    zsh) legacy completion zsh | sed "s/'queue:Manage host-wide job concurrency' 'upgrade:/'queue:Manage host-wide job concurrency' 'scheduler:GitHub-native queued-job scheduler' 'upgrade:/" ;;
+    zsh) v05 completion zsh | sed "s/'scheduler:GitHub-native queued-job scheduler'/'notify:Notification integrations and provider plugins' 'scheduler:GitHub-native queued-job scheduler'/" ;;
     fish)
-      legacy completion fish | sed "s/capacity queue upgrade/capacity queue scheduler upgrade/"
-      printf "%s\n" "complete -c runnerctl -n '__fish_seen_subcommand_from scheduler' -a 'status enable disable tick run drain resume'"
+      v05 completion fish | sed 's/capacity queue scheduler upgrade/capacity queue notify scheduler upgrade/'
+      printf "%s\n" "complete -c runnerctl -n '__fish_seen_subcommand_from notify' -a 'status providers test emit enable disable'"
       ;;
-    *) legacy completion "$@" ;;
+    *) v05 completion "$@" ;;
   esac
 }
 normalize_version(){ local v="${1#v}"; printf '%s' "${v%%-*}"; }
@@ -131,27 +127,24 @@ upgrade_check(){
 }
 cmd_upgrade(){
   local check=0 json=0 arg latest; shift || true
-  for arg in "$@"; do case "$arg" in --check) check=1 ;; --json) json=1 ;; --help|-h) legacy upgrade --help; return ;; *) printf 'runnerctl: unknown upgrade option: %s\n' "$arg" >&2; return 2 ;; esac; done
+  for arg in "$@"; do case "$arg" in --check) check=1 ;; --json) json=1 ;; --help|-h) v05 upgrade --help; return ;; *) printf 'runnerctl: unknown upgrade option: %s\n' "$arg" >&2; return 2 ;; esac; done
   [[ "$json" -eq 0 || "$check" -eq 1 ]] || { printf 'runnerctl: --json requires --check\n' >&2; return 2; }
   if [[ "$check" -eq 1 ]]; then upgrade_check "$json"; return; fi
   latest="$(latest_release_version)" || return 1
   if ! version_is_newer "$latest" "$VERSION"; then printf 'runnerctl %s is already up to date.\n' "$VERSION"; return; fi
-  RUNNERCTL_LATEST_VERSION="$latest" legacy upgrade
+  RUNNERCTL_LATEST_VERSION="$latest" v05 upgrade
 }
 main(){
   local cmd="${1:-help}" helper
   case "$cmd" in
     version|--version|-v) printf '%s\n' "$VERSION" ;;
-    scheduler) shift || true; helper="$(find_scheduler)"; exec bash "$helper" "$@" ;;
-    queue)
-      if [[ "${2:-}" == "--help" || "${2:-}" == "-h" || "${2:-}" == "help" ]]; then helper="$(find_queue)" || { legacy "$@"; return; }; exec bash "$helper" --help; fi
-      exec bash "$(find_legacy)" "$@" ;;
-    --help|-h) legacy "$@"; append_scheduler_help ;;
-    help) if [[ "${2:-}" == scheduler ]]; then helper="$(find_scheduler)"; exec bash "$helper" --help; fi; legacy "$@" ;;
-    agent|ai-agent) if [[ "${2:-}" == --json ]]; then agent_json; else legacy "$@"; append_scheduler_agent; fi ;;
+    notify) shift || true; helper="$(find_notify)"; exec bash "$helper" "$@" ;;
+    --help|-h) v05 "$@"; append_notify_help ;;
+    help) if [[ "${2:-}" == notify ]]; then helper="$(find_notify)"; exec bash "$helper" --help; fi; v05 "$@" ;;
+    agent|ai-agent) if [[ "${2:-}" == --json ]]; then agent_json; else v05 "$@"; append_notify_agent; fi ;;
     completion) shift || true; completion "$@" ;;
     upgrade|self-update) cmd_upgrade "$@" ;;
-    *) exec bash "$(find_legacy)" "$@" ;;
+    *) exec bash "$(find_v05)" "$@" ;;
   esac
 }
 main "$@"
