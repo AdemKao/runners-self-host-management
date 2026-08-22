@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+TOKEN="${RUNNERCTL_TELEGRAM_BOT_TOKEN:-}"
+CHAT_ID="${RUNNERCTL_TELEGRAM_CHAT_ID:-}"
+MESSAGE="${RUNNERCTL_NOTIFY_MESSAGE:-}"
+CURL_BIN="${RUNNERCTL_CURL_BIN:-curl}"
+[[ -n "$TOKEN" && -n "$CHAT_ID" ]] || { printf 'telegram provider is not configured\n' >&2; exit 2; }
+command -v "$CURL_BIN" >/dev/null 2>&1 || { printf 'telegram provider requires curl\n' >&2; exit 2; }
+# Consume the stable provider event contract even though Telegram renders text.
+cat >/dev/null
+{
+  printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN"
+  printf 'request = "POST"\n'
+} | "$CURL_BIN" -sS --fail --connect-timeout "${RUNNERCTL_NOTIFY_CONNECT_TIMEOUT:-2}" --max-time "${RUNNERCTL_NOTIFY_TOTAL_TIMEOUT:-4}" --config - \
+  --data-urlencode "chat_id=$CHAT_ID" --data-urlencode "text=$MESSAGE" >/dev/null
