@@ -13,7 +13,7 @@ find_v05(){
 find_notify(){
   local candidates=("${RUNNERCTL_NOTIFY_HELPER:-}" "$SCRIPT_DIR/bin/runnerctl-notify" "$SCRIPT_DIR/runnerctl-notify" "$SCRIPT_DIR/../libexec/runnerctl-notify" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-notify") candidate
   for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
-  printf 'runnerctl: notification helper not found. Reinstall runnerctl.\n' >&2; exit 1
+  return 1
 }
 v05(){ bash "$(find_v05)" "$@"; }
 
@@ -86,6 +86,26 @@ EOF
     *) v05 completion "$@" ;;
   esac
 }
+notify_fail_open(){
+  local event="$1" message="$2" helper
+  helper="$(find_notify 2>/dev/null || true)"; [[ -n "$helper" ]] || return 0
+  RUNNERCTL_NOTIFY_HOOK=1 bash "$helper" emit "$event" --message "$message" >/dev/null 2>&1 || true
+}
+cmd_scheduler(){
+  local sub="${2:-}" rc event=""; case "$sub" in
+    enable) event=scheduler.enabled ;;
+    disable) event=scheduler.disabled ;;
+    drain) event=scheduler.drained ;;
+    resume) event=scheduler.resumed ;;
+    tick) event="" ;;
+    *) exec bash "$(find_v05)" "$@" ;;
+  esac
+  if v05 "$@"; then
+    [[ -z "$event" ]] || notify_fail_open "$event" "runnerctl $event"
+    return 0
+  fi
+  rc=$?; notify_fail_open scheduler.error "runnerctl scheduler command failed: $sub"; return "$rc"
+}
 normalize_version(){ local v="${1#v}"; printf '%s' "${v%%-*}"; }
 version_is_newer(){
   local lhs rhs a b c x y z
@@ -138,9 +158,10 @@ main(){
   local cmd="${1:-help}" helper
   case "$cmd" in
     version|--version|-v) printf '%s\n' "$VERSION" ;;
-    notify) shift || true; helper="$(find_notify)"; exec bash "$helper" "$@" ;;
+    notify) shift || true; helper="$(find_notify)" || { printf 'runnerctl: notification helper not found. Reinstall runnerctl.\n' >&2; return 1; }; exec bash "$helper" "$@" ;;
+    scheduler) cmd_scheduler "$@" ;;
     --help|-h) v05 "$@"; append_notify_help ;;
-    help) if [[ "${2:-}" == notify ]]; then helper="$(find_notify)"; exec bash "$helper" --help; fi; v05 "$@" ;;
+    help) if [[ "${2:-}" == notify ]]; then helper="$(find_notify)" || return 1; exec bash "$helper" --help; fi; v05 "$@" ;;
     agent|ai-agent) if [[ "${2:-}" == --json ]]; then agent_json; else v05 "$@"; append_notify_agent; fi ;;
     completion) shift || true; completion "$@" ;;
     upgrade|self-update) cmd_upgrade "$@" ;;
