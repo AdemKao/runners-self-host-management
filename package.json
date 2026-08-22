@@ -1,27 +1,28 @@
 {
   "name": "@ademkao/runnerctl",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Manage GitHub Actions self-hosted runners on macOS and Linux with agent-friendly automation.",
   "license": "MIT",
   "private": false,
   "bin": {"runnerctl": "npm/runnerctl.js"},
   "files": [
-    "runnerctl", "runnerctl-base", "runnerctl-base-v05", "runnerctl-base-legacy", "install.sh", "install-legacy.sh",
+    "runnerctl", "runnerctl-base", "runnerctl-base-v06", "runnerctl-base-v05", "runnerctl-base-legacy", "install.sh", "install-legacy.sh",
     "bin/runnerctl", "bin/runnerctl-legacy", "bin/runnerctl-cleanup", "bin/runnerctl-host", "bin/runnerctl-ci", "bin/runnerctl-hooks",
     "bin/runnerctl-queue", "bin/runnerctl-queue-legacy", "bin/runnerctl-scheduler", "bin/runnerctl-scheduler-core",
     "bin/runnerctl-notify", "bin/runnerctl-notify-provider-telegram", "bin/runnerctl-notify-provider-line", "bin/runnerctl-notify-provider-webhook",
-    "npm/runnerctl.js", "AGENTS.md", "CLAUDE.md", "skills/runnerctl/SKILL.md", "docs/scheduler.md", "docs/notifications.md",
-    "docs/releases/v0.5.0.md", "docs/releases/v0.6.0.md",
+    "bin/runnerctl-bot", "bin/runnerctl-bot-controller.py",
+    "npm/runnerctl.js", "AGENTS.md", "CLAUDE.md", "skills/runnerctl/SKILL.md", "docs/scheduler.md", "docs/notifications.md", "docs/bot-controller.md",
+    "docs/releases/v0.5.0.md", "docs/releases/v0.6.0.md", "docs/releases/v0.7.0.md",
     "README.md", "README.zh-TW.md", "CHANGELOG.md", "LICENSE"
   ],
   "scripts": {
-    "test": "bash tests/smoke.sh && bash tests/scheduler.sh && bash tests/notify.sh",
-    "prepack": "bash -n runnerctl && bash -n runnerctl-base && bash -n runnerctl-base-v05 && bash -n runnerctl-base-legacy && bash -n bin/runnerctl && bash -n bin/runnerctl-legacy && bash -n bin/runnerctl-cleanup && bash -n bin/runnerctl-host && bash -n bin/runnerctl-ci && bash -n bin/runnerctl-hooks && bash -n bin/runnerctl-queue && bash -n bin/runnerctl-queue-legacy && bash -n bin/runnerctl-scheduler && bash -n bin/runnerctl-scheduler-core && bash -n bin/runnerctl-notify && bash -n bin/runnerctl-notify-provider-telegram && bash -n bin/runnerctl-notify-provider-line && bash -n bin/runnerctl-notify-provider-webhook && bash -n install.sh && bash -n install-legacy.sh && node --check npm/runnerctl.js"
+    "test": "bash tests/smoke.sh && bash tests/scheduler.sh && bash tests/notify.sh && if command -v python3 >/dev/null 2>&1; then python3 tests/test_bot_controller.py; else echo 'python3 not installed; skipping optional bot controller tests'; fi",
+    "prepack": "bash -n runnerctl && bash -n runnerctl-base && bash -n runnerctl-base-v06 && bash -n runnerctl-base-v05 && bash -n runnerctl-base-legacy && bash -n bin/runnerctl && bash -n bin/runnerctl-legacy && bash -n bin/runnerctl-cleanup && bash -n bin/runnerctl-host && bash -n bin/runnerctl-ci && bash -n bin/runnerctl-hooks && bash -n bin/runnerctl-queue && bash -n bin/runnerctl-queue-legacy && bash -n bin/runnerctl-scheduler && bash -n bin/runnerctl-scheduler-core && bash -n bin/runnerctl-notify && bash -n bin/runnerctl-notify-provider-telegram && bash -n bin/runnerctl-notify-provider-line && bash -n bin/runnerctl-notify-provider-webhook && bash -n bin/runnerctl-bot && bash -n install.sh && bash -n install-legacy.sh && node --check npm/runnerctl.js"
   },
   "repository": {"type": "git", "url": "git+https://github.com/AdemKao/runners-self-host-management.git"},
   "bugs": {"url": "https://github.com/AdemKao/runners-self-host-management/issues"},
   "homepage": "https://github.com/AdemKao/runners-self-host-management#readme",
-  "keywords": ["github-actions", "self-hosted-runner", "ci", "devops", "runner", "cli", "scheduler", "notifications", "telegram", "line", "webhook", "ai-agent", "automation"],
+  "keywords": ["github-actions", "self-hosted-runner", "ci", "devops", "runner", "cli", "scheduler", "notifications", "telegram", "line", "webhook", "bot", "api", "observability", "ai-agent", "automation"],
   "os": ["darwin", "linux"],
   "publishConfig": {"access": "public"}
 }
