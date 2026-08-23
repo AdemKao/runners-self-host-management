@@ -24,10 +24,12 @@ jobs:
         run: |
           bash -n runnerctl
           bash -n runnerctl-base
+          bash -n runnerctl-base-v07
           bash -n runnerctl-base-v06
           bash -n runnerctl-base-v05
           bash -n runnerctl-base-legacy
           bash -n bin/runnerctl
+          bash -n bin/runnerctl-v07
           bash -n bin/runnerctl-legacy
           bash -n bin/runnerctl-cleanup
           bash -n bin/runnerctl-host
@@ -42,6 +44,7 @@ jobs:
           bash -n bin/runnerctl-notify-provider-line
           bash -n bin/runnerctl-notify-provider-webhook
           bash -n bin/runnerctl-bot
+          bash -n bin/runnerctl-monitor
           python3 -m py_compile bin/runnerctl-bot-controller.py tests/test_bot_controller.py
           bash -n install.sh
           bash -n install-legacy.sh
@@ -51,6 +54,7 @@ jobs:
           bash -n tests/installer.sh
           bash -n tests/scheduler.sh
           bash -n tests/notify.sh
+          bash -n tests/monitor.sh
           bash -n tests/launchd-status.sh
           bash -n tests/cleanup.sh
           bash -n tests/doctor.sh
@@ -62,7 +66,7 @@ jobs:
       - name: Run smoke tests
         run: bash tests/smoke.sh
 
-      - name: Run v0.7 installer regression tests
+      - name: Run v0.8 installer regression tests
         run: bash tests/installer.sh
 
       - name: Run GitHub-native scheduler regression tests
@@ -70,6 +74,9 @@ jobs:
 
       - name: Run notification integration regression tests
         run: bash tests/notify.sh
+
+      - name: Run authoritative job outcome monitor regression tests
+        run: bash tests/monitor.sh
 
       - name: Run read-only bot/API controller regression tests
         run: python3 tests/test_bot_controller.py
