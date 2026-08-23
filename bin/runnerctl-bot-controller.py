@@ -17,11 +17,11 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 MIN_PYTHON = (3, 8)
 MAX_BODY = 64 * 1024
 MAX_REPLY = 3500
-READ_ONLY_COMMANDS = {"status", "runners", "queue", "scheduler", "health", "help"}
+READ_ONLY_COMMANDS = {"status", "runners", "queue", "scheduler", "health", "jobs", "failures", "help"}
 
 
 def env(name, default=""):
@@ -75,12 +75,14 @@ def query_payload(name):
     if name not in READ_ONLY_COMMANDS:
         return False, None, "unsupported read-only command"
     if name == "help":
-        return True, {"commands": ["status", "runners", "queue", "scheduler", "health", "help"], "read_only": True}, ""
+        return True, {"commands": ["status", "runners", "queue", "scheduler", "health", "jobs", "failures", "help"], "read_only": True}, ""
     mapping = {
         "runners": ["list", "--json"],
         "queue": ["queue", "status", "--json"],
         "scheduler": ["scheduler", "status", "--json"],
         "health": ["doctor", "--json"],
+        "jobs": ["monitor", "jobs", "--limit", "20", "--json"],
+        "failures": ["monitor", "failures", "--limit", "20", "--json"],
     }
     if name in mapping:
         return run_runnerctl(mapping[name])
@@ -90,6 +92,7 @@ def query_payload(name):
         ("runners", ["list", "--json"]),
         ("queue", ["queue", "status", "--json"]),
         ("scheduler", ["scheduler", "status", "--json"]),
+        ("monitor", ["monitor", "status", "--json"]),
         ("notifications", ["notify", "status", "--json"]),
     ):
         ok, value, error = run_runnerctl(args)
@@ -113,7 +116,7 @@ def normalize_command(text):
 
 def render_reply(command, payload):
     if command == "help":
-        return "runnerctl read-only commands:\n/status\n/runners\n/queue\n/scheduler\n/health\n/help"
+        return "runnerctl read-only commands:\n/status\n/runners\n/queue\n/scheduler\n/health\n/jobs\n/failures\n/help"
     text = "runnerctl %s\n%s" % (command, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     if len(text) > MAX_REPLY:
         text = text[:MAX_REPLY - 32] + "\n... output truncated"
@@ -252,7 +255,7 @@ def bearer_ok(header, token):
 
 
 class ControllerHandler(BaseHTTPRequestHandler):
-    server_version = "runnerctl-bot/0.7"
+    server_version = "runnerctl-bot/0.8"
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[runnerctl-bot] " + (fmt % args) + "\n")
@@ -278,7 +281,8 @@ class ControllerHandler(BaseHTTPRequestHandler):
             self.json_response(200, {"ok": True})
             return
         mapping = {"/v1/status": "status", "/v1/runners": "runners", "/v1/queue": "queue",
-                   "/v1/scheduler": "scheduler", "/v1/health": "health"}
+                   "/v1/scheduler": "scheduler", "/v1/health": "health", "/v1/jobs": "jobs",
+                   "/v1/failures": "failures"}
         command = mapping.get(path)
         if command is None:
             self.json_response(404, {"ok": False, "error": "not found"})
