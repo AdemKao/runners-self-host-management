@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.7.1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNERCTL_REPO="${RUNNERCTL_REPO:-AdemKao/runners-self-host-management}"
+
+find_v06(){
+  local candidates=("${RUNNERCTL_BASE_V06:-}" "$SCRIPT_DIR/runnerctl-base-v06" "$SCRIPT_DIR/../libexec/runnerctl-base-v06" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-base-v06") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  printf 'runnerctl: v0.6 compatibility frontend not found. Reinstall runnerctl.\n' >&2; exit 1
+}
+find_bot(){
+  local candidates=("${RUNNERCTL_BOT_HELPER:-}" "$SCRIPT_DIR/bin/runnerctl-bot" "$SCRIPT_DIR/runnerctl-bot" "$SCRIPT_DIR/../libexec/runnerctl-bot" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-bot") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  return 1
+}
+v06(){ bash "$(find_v06)" "$@"; }
+
+append_bot_help(){ cat <<'EOF'
+
+Read-only Bot/API controller:
+  bot            Query runnerctl from Telegram, LINE, or an authenticated
+                 local HTTP API without exposing mutating runner commands.
+
+Common commands:
+  runnerctl bot doctor --json
+  runnerctl bot query status --json
+  runnerctl bot telegram run
+  runnerctl bot serve --bind 127.0.0.1 --port 8765
+
+The controller is read-only in v0.7.x. Python 3 is an optional dependency only
+for bot/API commands. Use `runnerctl bot --help` for security/setup details.
+EOF
+}
+append_bot_agent(){ cat <<'EOF'
+
+Read-only Bot/API controller:
+  bot status          read-only local controller configuration
+  bot doctor          read-only prerequisite/security inspection
+  bot query           fixed read-only runnerctl query router
+  bot telegram run    long-poll Telegram and send read-only query replies
+  bot serve           serve authenticated read-only API + signed LINE webhook
+
+Remote mutating commands are intentionally not exposed in v0.7.x.
+EOF
+}
+agent_json(){
+  v06 agent --json | sed "s/\"version\": \"0\.6\.0\"/\"version\": \"$VERSION\"/" | awk '
+    /"notify disable":/ && !added {
+      print
+      print "    \"bot status\": {\"effect\": \"read-only-local\", \"json\": true},"
+      print "    \"bot doctor\": {\"effect\": \"read-only-local\", \"json\": true},"
+      print "    \"bot query\": {\"effect\": \"read-only\", \"json\": true},"
+      print "    \"bot telegram run\": {\"effect\": \"read-only-network-with-external-replies\"},"
+      print "    \"bot serve\": {\"effect\": \"read-only-http-controller\"},"
+      added=1; next
+    }
+    { print }
+  '
+}
+completion(){
+  local shell="${1:-}"
+  case "$shell" in
+    bash)
+      v06 completion bash | sed 's/capacity queue notify scheduler upgrade/capacity queue bot notify scheduler upgrade/'
+      cat <<'EOF'
+_runnerctl_bot_complete() {
+  if [[ "${COMP_WORDS[1]:-}" == "bot" && ${COMP_CWORD} -eq 2 ]]; then
+    COMPREPLY=( $(compgen -W "status doctor query telegram serve" -- "${COMP_WORDS[COMP_CWORD]}") )
+  else
+    _runnerctl_notify_complete "$@"
+  fi
+}
+complete -F _runnerctl_bot_complete runnerctl
+EOF
+      ;;
+    zsh) v06 completion zsh | sed "s/'notify:Notification integrations and provider plugins'/'bot:Read-only Telegram LINE and HTTP API controller' 'notify:Notification integrations and provider plugins'/" ;;
+    fish)
+      v06 completion fish | sed 's/capacity queue notify scheduler upgrade/capacity queue bot notify scheduler upgrade/'
+      printf "%s\n" "complete -c runnerctl -n '__fish_seen_subcommand_from bot' -a 'status doctor query telegram serve'"
+      ;;
+    *) v06 completion "$@" ;;
+  esac
+}
+normalize_version(){ local v="${1#v}"; printf '%s' "${v%%-*}"; }
+version_is_newer(){
+  local lhs rhs a b c x y z
+  lhs="$(normalize_version "$1")"; rhs="$(normalize_version "$2")"
+  IFS=. read -r a b c <<<"$lhs"; IFS=. read -r x y z <<<"$rhs"
+  a="${a:-0}"; b="${b:-0}"; c="${c:-0}"; x="${x:-0}"; y="${y:-0}"; z="${z:-0}"
+  ((10#$a > 10#$x)) && return 0; ((10#$a < 10#$x)) && return 1
+  ((10#$b > 10#$y)) && return 0; ((10#$b < 10#$y)) && return 1
+  ((10#$c > 10#$z))
+}
+latest_release_version(){
+  if [[ -n "${RUNNERCTL_LATEST_VERSION:-}" ]]; then normalize_version "$RUNNERCTL_LATEST_VERSION"; return; fi
+  command -v curl >/dev/null 2>&1 || { printf 'runnerctl: curl is required to check for updates\n' >&2; return 1; }
+  local response version
+  response="$(curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$RUNNERCTL_REPO/releases/latest")" || return 1
+  version="$(printf '%s\n' "$response" | sed -n 's/.*"tag_name":[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$version" ]] || return 1; normalize_version "$version"
+}
+detect_install_method(){
+  if [[ -n "${RUNNERCTL_INSTALL_METHOD:-}" ]]; then printf '%s' "$RUNNERCTL_INSTALL_METHOD"; return; fi
+  if [[ "${RUNNERCTL_CORE:-}" == *"/Cellar/runnerctl/"* ]]; then printf 'homebrew'; return; fi
+  if command -v brew >/dev/null 2>&1 && brew list --versions runnerctl >/dev/null 2>&1; then printf 'homebrew'; return; fi
+  case "$SCRIPT_DIR" in *"/.pnpm/"*|*"/pnpm/global/"*) printf 'pnpm'; return ;; *"/node_modules/@ademkao/runnerctl"|*"/node_modules/@ademkao/runnerctl/"*) printf 'npm'; return ;; esac
+  if [[ "$(basename "$SCRIPT_DIR")" == "runnerctl" || "$(basename "$SCRIPT_DIR")" == "libexec" ]]; then printf 'shell'; return; fi
+  printf 'unknown'
+}
+upgrade_command_for(){ case "$1" in homebrew) printf 'brew update && brew upgrade runnerctl' ;; pnpm) printf 'pnpm add -g github:%s#v%s' "$RUNNERCTL_REPO" "$2" ;; npm) printf 'npm install -g github:%s#v%s' "$RUNNERCTL_REPO" "$2" ;; shell) printf 'install GitHub Release v%s with install.sh and SHA-256 verification' "$2" ;; *) printf 'reinstall runnerctl using a supported installer' ;; esac; }
+upgrade_check(){
+  local json="$1" latest method available=false command
+  latest="$(latest_release_version)" || { printf 'runnerctl: failed to resolve latest release\n' >&2; return 1; }
+  method="$(detect_install_method)"; version_is_newer "$latest" "$VERSION" && available=true; command="$(upgrade_command_for "$method" "$latest")"
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"current_version":"%s","latest_version":"%s","update_available":%s,"install_method":"%s","update_command":"' "$VERSION" "$latest" "$available" "$method"
+    printf '%s' "$command" | sed 's/\\/\\\\/g;s/"/\\"/g'; printf '"}\n'
+  else
+    printf 'Current version: %s\nLatest version:  %s\nInstallation:    %s\nUpdate available: %s\n' "$VERSION" "$latest" "$method" "$([[ "$available" == true ]] && printf yes || printf no)"
+    [[ "$available" == false ]] || printf 'Update command:   %s\n' "$command"
+  fi
+}
+cmd_upgrade(){
+  local check=0 json=0 arg latest; shift || true
+  for arg in "$@"; do case "$arg" in --check) check=1 ;; --json) json=1 ;; --help|-h) v06 upgrade --help; return ;; *) printf 'runnerctl: unknown upgrade option: %s\n' "$arg" >&2; return 2 ;; esac; done
+  [[ "$json" -eq 0 || "$check" -eq 1 ]] || { printf 'runnerctl: --json requires --check\n' >&2; return 2; }
+  if [[ "$check" -eq 1 ]]; then upgrade_check "$json"; return; fi
+  latest="$(latest_release_version)" || return 1
+  if ! version_is_newer "$latest" "$VERSION"; then printf 'runnerctl %s is already up to date.\n' "$VERSION"; return; fi
+  RUNNERCTL_LATEST_VERSION="$latest" v06 upgrade
+}
+main(){
+  local cmd="${1:-help}" helper
+  case "$cmd" in
+    version|--version|-v) printf '%s\n' "$VERSION" ;;
+    bot) shift || true; helper="$(find_bot)" || { printf 'runnerctl: bot controller helper not found. Reinstall runnerctl.\n' >&2; return 1; }; exec bash "$helper" "$@" ;;
+    --help|-h) v06 "$@"; append_bot_help ;;
+    help) if [[ "${2:-}" == bot ]]; then helper="$(find_bot)" || return 1; exec bash "$helper" --help; fi; v06 "$@" ;;
+    agent|ai-agent) if [[ "${2:-}" == --json ]]; then agent_json; else v06 "$@"; append_bot_agent; fi ;;
+    completion) shift || true; completion "$@" ;;
+    upgrade|self-update) cmd_upgrade "$@" ;;
+    *) exec bash "$(find_v06)" "$@" ;;
+  esac
+}
+main "$@"
