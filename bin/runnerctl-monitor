@@ -6,6 +6,7 @@ RUNNERS_DIR="$RUNNERCTL_HOME/runners"
 MONITOR_DIR="$RUNNERCTL_HOME/monitor"
 CONFIG_FILE="$MONITOR_DIR/config"
 HISTORY_FILE="$MONITOR_DIR/jobs.jsonl"
+SEEN_RUNS_FILE="$MONITOR_DIR/runs.seen"
 STATUS_FILE="$MONITOR_DIR/status"
 PID_FILE="$MONITOR_DIR/monitor.pid"
 LOG_FILE="$MONITOR_DIR/monitor.log"
@@ -37,10 +38,13 @@ managed runner for that repository.
 Important semantics:
   - Final conclusions come from GitHub's Actions REST API, not from the local
     runner completion hook.
-  - The first successful poll creates a baseline and DOES NOT send historical
-    outcome notifications.
+  - The first fully successful poll creates a baseline and DOES NOT send
+    historical outcome notifications.
   - Later new outcomes emit best-effort events such as job.succeeded,
     job.failed, job.cancelled, job.timed_out, and job.skipped.
+  - Completed run attempts are remembered, so steady-state polling normally
+    needs only the completed-runs request plus job requests for newly completed
+    runs instead of re-reading the same jobs every interval.
   - Existing v0.6 job.completed hook notifications remain unchanged.
   - History contains metadata only; job logs, step output, environment values,
     and GitHub tokens are not persisted.
@@ -50,7 +54,7 @@ or another service manager for reboot persistence.
 EOF
 }
 
-ensure_dirs(){ mkdir -p "$MONITOR_DIR" "$RUNNERS_DIR"; chmod 0700 "$MONITOR_DIR" 2>/dev/null || true; touch "$HISTORY_FILE"; chmod 0600 "$HISTORY_FILE" 2>/dev/null || true; }
+ensure_dirs(){ mkdir -p "$MONITOR_DIR" "$RUNNERS_DIR"; chmod 0700 "$MONITOR_DIR" 2>/dev/null || true; touch "$HISTORY_FILE" "$SEEN_RUNS_FILE"; chmod 0600 "$HISTORY_FILE" "$SEEN_RUNS_FILE" 2>/dev/null || true; }
 config_value(){ awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$CONFIG_FILE" 2>/dev/null || true; }
 monitor_enabled(){ [[ "$(config_value enabled)" == true ]]; }
 monitor_initialized(){ [[ "$(config_value initialized)" == true ]]; }
@@ -76,17 +80,16 @@ account_token(){
 gh_api_as(){ local account="$1" token; shift; token="$(account_token "$account")" || return 1; GH_TOKEN="$token" GH_HOST="$GITHUB_HOST" gh api -H "X-GitHub-Api-Version: 2026-03-10" "$@"; }
 
 managed_scope_rows(){
-  local d name repo account fallback
-  fallback="$(active_account)"
+  local d name repo account fallback=""
   for d in "$RUNNERS_DIR"/*; do
     [[ -f "$d/.runnerctl-meta" ]] || continue
     name="$(meta_get "$d" name)"; [[ -n "$name" ]] || name="$(basename "$d")"
     repo="$(meta_get "$d" repo)"; [[ -n "$repo" ]] || continue
-    account="$(meta_get "$d" account)"; [[ -n "$account" ]] || account="$fallback"
+    account="$(meta_get "$d" account)"
+    if [[ -z "$account" ]]; then [[ -n "$fallback" ]] || fallback="$(active_account)"; account="$fallback"; fi
     printf '%s\t%s\t%s\n' "$repo" "$account" "$name"
   done | sort -t $'\t' -k1,1 -k2,2 -k3,3 -u
 }
-
 scope_repositories(){ managed_scope_rows | awk -F'\t' '!seen[$1 FS $2]++ {print $1 "\t" $2}'; }
 managed_names_for(){ local repo="$1" account="$2"; managed_scope_rows | awk -F'\t' -v r="$repo" -v a="$account" '$1==r && $2==a {print $3}'; }
 name_is_managed(){ local file="$1" name="$2"; grep -Fxq "$name" "$file" 2>/dev/null; }
@@ -119,6 +122,7 @@ notify_outcome(){
 }
 
 history_has_key(){ local key="$1" extra="${2:-}"; grep -Fq "\"key\":\"$key\"" "$HISTORY_FILE" 2>/dev/null || { [[ -n "$extra" ]] && grep -Fq "\"key\":\"$key\"" "$extra" 2>/dev/null; }; }
+run_seen(){ local key="$1" extra="${2:-}"; grep -Fxq "$key" "$SEEN_RUNS_FILE" 2>/dev/null || { [[ -n "$extra" ]] && grep -Fxq "$key" "$extra" 2>/dev/null; }; }
 record_json(){
   local key="$1" repo="$2" job_id="$3" run_id="$4" attempt="$5" workflow="$6" job="$7" conclusion="$8" runner_id="$9" runner_name="${10}" branch="${11}" sha="${12}" started="${13}" completed="${14}" url="${15}" recorded
   recorded="$(now_utc)"
@@ -142,18 +146,15 @@ record_json(){
 }
 
 poll_repo(){
-  local account="$1" repo="$2" work="$3" newfile="$4" notifyfile="$5" names="$work/names" runs="$work/runs" run_id attempt workflow branch sha jobs job_id job_run job_name conclusion started completed runner_id runner_name url key
+  local account="$1" repo="$2" work="$3" newfile="$4" notifyfile="$5" newseen="$6" names="$work/names" runs="$work/runs" run_id attempt workflow branch sha jobs job_id job_run job_name conclusion started completed runner_id runner_name url key run_key
   managed_names_for "$repo" "$account" >"$names"
   [[ -s "$names" ]] || return 0
-  if ! gh_api_as "$account" "repos/$repo/actions/runs?status=completed&per_page=$RUNS_PER_REPO" --jq '.workflow_runs[] | [(.id|tostring),((.run_attempt//1)|tostring),(.name//""),(.head_branch//""),(.head_sha//"")] | @tsv' >"$runs"; then
-    return 1
-  fi
+  if ! gh_api_as "$account" "repos/$repo/actions/runs?status=completed&per_page=$RUNS_PER_REPO" --jq '.workflow_runs[] | [(.id|tostring),((.run_attempt//1)|tostring),(.name//""),(.head_branch//""),(.head_sha//"")] | @tsv' >"$runs"; then return 1; fi
   while IFS=$'\t' read -r run_id attempt workflow branch sha; do
     [[ -n "$run_id" ]] || continue
-    jobs="$work/jobs-$run_id"
-    if ! gh_api_as "$account" "repos/$repo/actions/runs/$run_id/jobs?filter=latest&per_page=100" --jq '.jobs[] | select(.status=="completed") | [(.id|tostring),(.run_id|tostring),(.name//""),(.conclusion//""),(.started_at//""),(.completed_at//""),((.runner_id//0)|tostring),(.runner_name//""),(.html_url//"")] | @tsv' >"$jobs"; then
-      return 1
-    fi
+    run_key="$repo#$run_id#$attempt"; run_seen "$run_key" "$newseen" && continue
+    jobs="$work/jobs-$run_id-$attempt"
+    if ! gh_api_as "$account" "repos/$repo/actions/runs/$run_id/jobs?filter=latest&per_page=100" --jq '.jobs[] | select(.status=="completed") | [(.id|tostring),(.run_id|tostring),(.name//""),(.conclusion//""),(.started_at//""),(.completed_at//""),((.runner_id//0)|tostring),(.runner_name//""),(.html_url//"")] | @tsv' >"$jobs"; then return 1; fi
     while IFS=$'\t' read -r job_id job_run job_name conclusion started completed runner_id runner_name url; do
       [[ -n "$job_id" && -n "$conclusion" && -n "$runner_name" ]] || continue
       name_is_managed "$names" "$runner_name" || continue
@@ -162,6 +163,7 @@ poll_repo(){
       record_json "$key" "$repo" "$job_id" "$job_run" "$attempt" "$workflow" "$job_name" "$conclusion" "$runner_id" "$runner_name" "$branch" "$sha" "$started" "$completed" "$url" >>"$newfile"
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(outcome_event "$conclusion")" "$runner_name" "$repo" "$job_run" "$job_name" "$conclusion" >>"$notifyfile"
     done <"$jobs"
+    printf '%s\n' "$run_key" >>"$newseen"
   done <"$runs"
 }
 
@@ -172,40 +174,35 @@ write_status(){
   chmod 0600 "$tmp" 2>/dev/null || true; mv "$tmp" "$STATUS_FILE"
 }
 status_value(){ awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$STATUS_FILE" 2>/dev/null || true; }
-
-commit_history(){
-  local newfile="$1" keep="$2" tmp
-  [[ -s "$newfile" ]] || return 0
-  tmp="$(mktemp "$MONITOR_DIR/history.XXXXXX")"
-  cat "$HISTORY_FILE" "$newfile" | tail -n "$keep" >"$tmp"
-  chmod 0600 "$tmp" 2>/dev/null || true; mv "$tmp" "$HISTORY_FILE"
+commit_history(){ local newfile="$1" keep="$2" tmp; [[ -s "$newfile" ]] || return 0; tmp="$(mktemp "$MONITOR_DIR/history.XXXXXX")"; cat "$HISTORY_FILE" "$newfile" | tail -n "$keep" >"$tmp"; chmod 0600 "$tmp" 2>/dev/null || true; mv "$tmp" "$HISTORY_FILE"; }
+commit_seen_runs(){
+  local newseen="$1" keep="$2" tmp seen_keep
+  [[ -s "$newseen" ]] || return 0
+  seen_keep=$((keep * 5)); (( seen_keep < 500 )) && seen_keep=500; (( seen_keep > 20000 )) && seen_keep=20000
+  tmp="$(mktemp "$MONITOR_DIR/seen.XXXXXX")"; cat "$SEEN_RUNS_FILE" "$newseen" | awk '!seen[$0]++' | tail -n "$seen_keep" >"$tmp"; chmod 0600 "$tmp" 2>/dev/null || true; mv "$tmp" "$SEEN_RUNS_FILE"
 }
 
 poll_once(){
-  local json="${1:-0}" work newfile notifyfile repo account repos=0 errors=0 new_count=0 first=false keep result=success line event runner rrepo run_id job conclusion
-  ensure_dirs
-  monitor_initialized || first=true
-  keep="$(retention)"
-  work="$(mktemp -d "$MONITOR_DIR/poll.XXXXXX")"; newfile="$work/new.jsonl"; notifyfile="$work/notify.tsv"; : >"$newfile"; : >"$notifyfile"
+  local json="${1:-0}" work newfile notifyfile newseen repo account repos=0 errors=0 new_count=0 first=false keep result=success event runner rrepo run_id job conclusion message enabled_now=false
+  ensure_dirs; monitor_initialized || first=true; monitor_enabled && enabled_now=true; keep="$(retention)"
+  work="$(mktemp -d "$MONITOR_DIR/poll.XXXXXX")"; newfile="$work/new.jsonl"; notifyfile="$work/notify.tsv"; newseen="$work/newseen"; : >"$newfile"; : >"$notifyfile"; : >"$newseen"
   while IFS=$'\t' read -r repo account; do
     [[ -n "$repo" ]] || continue; repos=$((repos+1)); mkdir -p "$work/repo-$repos"
-    if ! poll_repo "$account" "$repo" "$work/repo-$repos" "$newfile" "$notifyfile"; then warn "failed to poll completed Actions jobs for $repo"; errors=$((errors+1)); fi
+    if ! poll_repo "$account" "$repo" "$work/repo-$repos" "$newfile" "$notifyfile" "$newseen"; then warn "failed to poll completed Actions jobs for $repo"; errors=$((errors+1)); fi
   done < <(scope_repositories)
-  new_count="$(wc -l <"$newfile" | tr -d ' ')"
-  commit_history "$newfile" "$keep"
+  new_count="$(wc -l <"$newfile" | tr -d ' ')"; commit_history "$newfile" "$keep"; commit_seen_runs "$newseen" "$keep"
   if [[ "$first" == true ]]; then
-    write_config "$(monitor_enabled && printf true || printf false)" "$(poll_interval)" "$keep" true
+    if (( errors == 0 )); then write_config "$enabled_now" "$(poll_interval)" "$keep" true; fi
   else
     while IFS=$'\t' read -r event runner rrepo run_id job conclusion; do
       [[ -n "$event" ]] || continue
-      notify_outcome "$event" "$runner" "[runnerctl] $event\nrepo: $rrepo\njob: $job\nconclusion: $conclusion\nrun: $run_id" "$rrepo" "$run_id" "$job"
+      printf -v message '[runnerctl] %s\nrepo: %s\njob: %s\nconclusion: %s\nrun: %s' "$event" "$rrepo" "$job" "$conclusion" "$run_id"
+      notify_outcome "$event" "$runner" "$message" "$rrepo" "$run_id" "$job"
     done <"$notifyfile"
   fi
-  (( errors == 0 )) || result=partial
-  write_status "$result" "$repos" "$new_count" "$errors"
+  (( errors == 0 )) || result=partial; write_status "$result" "$repos" "$new_count" "$errors"
   if [[ "$json" -eq 1 ]]; then printf '{"result":'; json_quote "$result"; printf ',"repositories":%s,"new_outcomes":%s,"errors":%s,"baseline":%s}\n' "$repos" "$new_count" "$errors" "$first"; else info "poll complete: result=$result repositories=$repos new_outcomes=$new_count baseline=$first errors=$errors"; fi
-  rm -rf "$work"
-  (( errors == 0 ))
+  rm -rf "$work"; (( errors == 0 ))
 }
 
 controller_running(){ local pid=""; [[ -f "$PID_FILE" ]] && pid="$(cat "$PID_FILE" 2>/dev/null || true)"; [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; }
@@ -213,36 +210,23 @@ stop_controller(){ local pid=""; [[ -f "$PID_FILE" ]] && pid="$(cat "$PID_FILE" 
 start_controller(){ [[ "${RUNNERCTL_MONITOR_NO_BACKGROUND:-0}" == 1 ]] && return 0; controller_running && return 0; ensure_dirs; nohup bash "$0" run >>"$LOG_FILE" 2>&1 </dev/null & printf '%s\n' "$!" >"$PID_FILE"; }
 
 history_array(){
-  local mode="$1" limit="$2" tmp first=true line conclusion
+  local mode="$1" limit="$2" tmp first=true line
   ensure_dirs; tmp="$(mktemp "$MONITOR_DIR/view.XXXXXX")"; : >"$tmp"
   if [[ "$mode" == failures ]]; then
-    while IFS= read -r line; do
-      case "$line" in *'"conclusion":"failure"'*|*'"conclusion":"cancelled"'*|*'"conclusion":"timed_out"'*|*'"conclusion":"action_required"'*|*'"conclusion":"stale"'*) printf '%s\n' "$line" >>"$tmp" ;; esac
-    done <"$HISTORY_FILE"
+    while IFS= read -r line; do case "$line" in *'"conclusion":"failure"'*|*'"conclusion":"cancelled"'*|*'"conclusion":"timed_out"'*|*'"conclusion":"action_required"'*|*'"conclusion":"stale"'*) printf '%s\n' "$line" >>"$tmp" ;; esac; done <"$HISTORY_FILE"
   else cat "$HISTORY_FILE" >"$tmp"; fi
-  printf '['
-  while IFS= read -r line; do [[ -n "$line" ]] || continue; [[ "$first" == true ]] || printf ','; first=false; printf '%s' "$line"; done < <(tail -n "$limit" "$tmp" | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--) print a[i]}')
-  printf ']\n'; rm -f "$tmp"
+  printf '['; while IFS= read -r line; do [[ -n "$line" ]] || continue; [[ "$first" == true ]] || printf ','; first=false; printf '%s' "$line"; done < <(tail -n "$limit" "$tmp" | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--) print a[i]}'); printf ']\n'; rm -f "$tmp"
 }
-
-history_human(){
-  local mode="$1" limit="$2" json line
-  json="$(history_array "$mode" "$limit")"
-  if command -v python3 >/dev/null 2>&1; then
-    printf '%s' "$json" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print("Recent job outcomes" if rows else "No recorded job outcomes."); [print("%-10s %-28s %-24s %s" % (r.get("conclusion",""), r.get("repository",""), r.get("job",""), r.get("completed_at",""))) for r in rows]'
-  else
-    printf '%s' "$json"
-  fi
-}
+history_human(){ local mode="$1" limit="$2" json; json="$(history_array "$mode" "$limit")"; if command -v python3 >/dev/null 2>&1; then printf '%s' "$json" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print("Recent job outcomes" if rows else "No recorded job outcomes."); [print("%-12s %-28s %-24s %s" % (r.get("conclusion",""), r.get("repository",""), r.get("job",""), r.get("completed_at",""))) for r in rows]'; else printf '%s' "$json"; fi; }
 
 cmd_status(){
-  local json=0 enabled=false running=false initialized=false count failures
+  local json=0 enabled=false running=false initialized=false count failures last_errors
   [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "status accepts only --json"
-  ensure_dirs; monitor_enabled && enabled=true; controller_running && running=true; monitor_initialized && initialized=true; count="$(wc -l <"$HISTORY_FILE" | tr -d ' ')"; failures="$(grep -Ec '\"conclusion\":\"(failure|cancelled|timed_out|action_required|stale)\"' "$HISTORY_FILE" 2>/dev/null || true)"
+  ensure_dirs; monitor_enabled && enabled=true; controller_running && running=true; monitor_initialized && initialized=true; count="$(wc -l <"$HISTORY_FILE" | tr -d ' ')"; failures="$(grep -Ec '\"conclusion\":\"(failure|cancelled|timed_out|action_required|stale)\"' "$HISTORY_FILE" 2>/dev/null || true)"; last_errors="$(status_value errors)"; [[ "$last_errors" =~ ^[0-9]+$ ]] || last_errors=0
   if [[ "$json" -eq 1 ]]; then
-    printf '{"enabled":%s,"controller_running":%s,"initialized":%s,"interval_seconds":%s,"retention":%s,"history_count":%s,"failure_count":%s,"last_poll":' "$enabled" "$running" "$initialized" "$(poll_interval)" "$(retention)" "$count" "$failures"; json_quote "$(status_value last_poll)"; printf ',"last_result":'; json_quote "$(status_value last_result)"; printf ',"last_errors":%s}\n' "${status_value_errors:-$(status_value errors)}" | sed 's/:}/:0}/';
+    printf '{"enabled":%s,"controller_running":%s,"initialized":%s,"interval_seconds":%s,"retention":%s,"history_count":%s,"failure_count":%s,"seen_run_attempts":%s,"last_poll":' "$enabled" "$running" "$initialized" "$(poll_interval)" "$(retention)" "$count" "$failures" "$(wc -l <"$SEEN_RUNS_FILE" | tr -d ' ')"; json_quote "$(status_value last_poll)"; printf ',"last_result":'; json_quote "$(status_value last_result)"; printf ',"last_errors":%s}\n' "$last_errors"
   else
-    printf 'Monitor\n  enabled: %s\n  controller running: %s\n  initialized: %s\n  interval: %ss\n  retention: %s\n  history: %s\n  failure-like outcomes: %s\n  last poll: %s\n  last result: %s\n' "$enabled" "$running" "$initialized" "$(poll_interval)" "$(retention)" "$count" "$failures" "$(status_value last_poll)" "$(status_value last_result)"
+    printf 'Monitor\n  enabled: %s\n  controller running: %s\n  initialized: %s\n  interval: %ss\n  retention: %s\n  history: %s\n  failure-like outcomes: %s\n  seen run attempts: %s\n  last poll: %s\n  last result: %s\n  last errors: %s\n' "$enabled" "$running" "$initialized" "$(poll_interval)" "$(retention)" "$count" "$failures" "$(wc -l <"$SEEN_RUNS_FILE" | tr -d ' ')" "$(status_value last_poll)" "$(status_value last_result)" "$last_errors"
   fi
 }
 
@@ -256,7 +240,7 @@ cmd_enable(){
 }
 cmd_disable(){ [[ $# -eq 0 ]] || die "disable accepts no arguments"; local interval keep initialized=false; interval="$(poll_interval)"; keep="$(retention)"; monitor_initialized && initialized=true; stop_controller; write_config false "$interval" "$keep" "$initialized"; info "monitor disabled; history retained"; }
 cmd_run(){ [[ $# -eq 0 ]] || die "run accepts no arguments"; monitor_enabled || die "monitor is not enabled"; while monitor_enabled; do poll_once 0 || true; sleep "$(poll_interval)"; done; }
-cmd_once(){ local json=0; [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "once accepts only --json"; poll_once "$json"; }
+cmd_once(){ local json=0; [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "once accepts only --json"; if controller_running && [[ "${RUNNERCTL_MONITOR_ALLOW_CONCURRENT:-0}" != 1 ]]; then die "background monitor is running; use monitor status or stop it before manual once"; fi; poll_once "$json"; }
 cmd_history(){ local mode="$1"; shift; local limit=20 json=0; while [[ $# -gt 0 ]]; do case "$1" in --limit) limit="${2:-}"; shift 2 ;; --json) json=1; shift ;; *) die "$mode accepts --limit N and --json" ;; esac; done; [[ "$limit" =~ ^[1-9][0-9]*$ ]] && (( limit <= 100 )) || die "--limit must be 1..100"; [[ "$json" -eq 1 ]] && history_array "$mode" "$limit" || history_human "$mode" "$limit"; }
 
 main(){
