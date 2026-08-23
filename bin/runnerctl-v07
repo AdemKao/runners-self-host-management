@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="0.7.1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+find_legacy(){
+  local candidates=("${RUNNERCTL_CORE_LEGACY:-}" "$SCRIPT_DIR/runnerctl-legacy" "$SCRIPT_DIR/runnerctl-core-legacy" "$SCRIPT_DIR/../libexec/runnerctl-core-legacy" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-core-legacy") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  printf 'runnerctl: legacy core not found. Reinstall runnerctl.\n' >&2; exit 1
+}
+find_notify(){
+  local candidates=("${RUNNERCTL_NOTIFY_HELPER:-}" "$SCRIPT_DIR/runnerctl-notify" "$SCRIPT_DIR/../libexec/runnerctl-notify" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-notify") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  printf 'runnerctl: notification helper not found. Reinstall runnerctl.\n' >&2; exit 1
+}
+find_bot(){
+  local candidates=("${RUNNERCTL_BOT_HELPER:-}" "$SCRIPT_DIR/runnerctl-bot" "$SCRIPT_DIR/../libexec/runnerctl-bot" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-bot") candidate
+  for candidate in "${candidates[@]}"; do [[ -n "$candidate" && -f "$candidate" ]] || continue; printf '%s' "$candidate"; return; done
+  printf 'runnerctl: bot controller helper not found. Reinstall runnerctl.\n' >&2; exit 1
+}
+case "${1:-}" in
+  version|--version|-v) printf '%s\n' "$VERSION" ;;
+  notify) shift || true; exec bash "$(find_notify)" "$@" ;;
+  bot) shift || true; exec bash "$(find_bot)" "$@" ;;
+  doctor) bash "$(find_legacy)" "$@" | sed -E "s/^version: .*/version: $VERSION/" ;;
+  *) exec bash "$(find_legacy)" "$@" ;;
+esac
