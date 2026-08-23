@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-tmp="$ROOT/tests/.smoke-v070.$$"
+tmp="$ROOT/tests/.smoke-v071.$$"
 cleanup(){ rm -f "$tmp" "$tmp.help" "$tmp.scheduler" "$tmp.queue" "$tmp.notify" "$tmp.bot"; }
 trap cleanup EXIT
 sed \
-  -e 's/VERSION="0\.4\.3"/VERSION="0.7.0"/' \
-  -e 's/NEXT_VERSION="0\.4\.4"/NEXT_VERSION="0.7.1"/' \
+  -e 's/VERSION="0\.4\.3"/VERSION="0.7.1"/' \
+  -e 's/NEXT_VERSION="0\.4\.4"/NEXT_VERSION="0.7.2"/' \
   -e "s/'host-wide execution gate'/'Legacy host-side admission gate'/g" \
   -e 's/capacity queue upgrade/capacity queue bot notify scheduler upgrade/g' \
   "$ROOT/tests/smoke-legacy.sh" >"$tmp"
 bash "$tmp"
-[[ "$(bash "$ROOT/runnerctl" version)" == "0.7.0" ]]
+[[ "$(bash "$ROOT/runnerctl" version)" == "0.7.1" ]]
 bash "$ROOT/runnerctl" --help >"$tmp.help"
 grep -q 'GitHub-native scheduling' "$tmp.help"
 grep -q 'Notifications and integrations' "$tmp.help"
@@ -32,4 +32,4 @@ bash "$ROOT/runnerctl" agent --json | grep -q '"scheduler status"'
 bash "$ROOT/runnerctl" agent --json | grep -q '"notify status"'
 bash "$ROOT/runnerctl" agent --json | grep -q '"bot query"'
 bash "$ROOT/runnerctl" completion bash | grep -q 'bot'
-echo "v0.7 smoke wrapper passed"
+echo "v0.7.1 smoke wrapper passed"

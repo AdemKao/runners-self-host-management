@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.7.0"
+VERSION="0.7.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNERCTL_REPO="${RUNNERCTL_REPO:-AdemKao/runners-self-host-management}"
 
@@ -29,7 +29,7 @@ Common commands:
   runnerctl bot telegram run
   runnerctl bot serve --bind 127.0.0.1 --port 8765
 
-The controller is read-only in v0.7.0. Python 3 is an optional dependency only
+The controller is read-only in v0.7.x. Python 3 is an optional dependency only
 for bot/API commands. Use `runnerctl bot --help` for security/setup details.
 EOF
 }
@@ -42,7 +42,7 @@ Read-only Bot/API controller:
   bot telegram run    long-poll Telegram and send read-only query replies
   bot serve           serve authenticated read-only API + signed LINE webhook
 
-Remote mutating commands are intentionally not exposed in v0.7.0.
+Remote mutating commands are intentionally not exposed in v0.7.x.
 EOF
 }
 agent_json(){

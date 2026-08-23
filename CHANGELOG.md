@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-23
+
+### Added
+- Focused English and Traditional Chinese Telegram Chat ID quickstart guides using the official Bot API `getUpdates` response and `message.chat.id`.
+- Explicit private-chat versus group/supergroup recommendations for runner operators.
+- Examples for positive private chat IDs, negative group/supergroup IDs, and comma-separated inbound allowlists.
+- Dedicated v0.7.1 release notes covering Telegram Chat ID setup and long-polling caveats.
+
+### Changed
+- Clarified the difference between `RUNNERCTL_TELEGRAM_CHAT_ID` (single outbound destination / compatibility fallback) and `RUNNERCTL_TELEGRAM_ALLOWED_CHAT_IDS` (explicit inbound read-only allowlist).
+- Bot/API help wording now describes the read-only guarantee as applying to the v0.7.x line.
+
+### Compatibility / limitations
+- No scheduler, queue, runner lifecycle, notification delivery, LINE, or Bot/API permission behavior changes are introduced in this patch.
+- runnerctl's Telegram controller continues to use `getUpdates` long polling; a separate Telegram webhook configured for the same bot must be removed/disabled before using the long-polling controller.
+
 ## [0.7.0] - 2026-08-23
 
 ### Added
@@ -200,7 +216,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The project began with the initial `runnerctl` implementation for managing multiple GitHub Actions self-hosted runners on one host, including runner registration, service lifecycle management, logs, removal, environment diagnostics, installation tooling, CI, and local isolation guidance.
 
-[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.1
 [0.7.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.0
 [0.6.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.6.0
 [0.5.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.5.0
