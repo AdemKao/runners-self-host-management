@@ -47,7 +47,7 @@ class Runnerctl < Formula
   end
 
   test do
-    assert_equal "0.7.0", shell_output("#{bin}/runnerctl version").strip
+    assert_equal "0.7.1", shell_output("#{bin}/runnerctl version").strip
     assert_match "AI AGENT", shell_output("#{bin}/runnerctl --help")
     assert_match "GitHub-native scheduling", shell_output("#{bin}/runnerctl --help")
     assert_match "Notifications and integrations", shell_output("#{bin}/runnerctl --help")
@@ -56,6 +56,6 @@ class Runnerctl < Formula
     assert_match "GitHub-native scheduler", shell_output("#{bin}/runnerctl scheduler --help")
     assert_match "Notification providers", shell_output("#{bin}/runnerctl notify providers")
     assert_match '"enabled":false', shell_output("#{bin}/runnerctl scheduler status --json")
-    assert_match '"current_version":"0.7.0"', shell_output("RUNNERCTL_LATEST_VERSION=0.7.0 RUNNERCTL_INSTALL_METHOD=homebrew #{bin}/runnerctl upgrade --check --json")
+    assert_match '"current_version":"0.7.1"', shell_output("RUNNERCTL_LATEST_VERSION=0.7.1 RUNNERCTL_INSTALL_METHOD=homebrew #{bin}/runnerctl upgrade --check --json")
   end
 end
