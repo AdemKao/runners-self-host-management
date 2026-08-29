@@ -9,6 +9,8 @@ HOOK_TARGET_DIR="$NOTIFY_DIR/hooks"
 PLUGIN_DIR="$RUNNERCTL_HOME/plugins/notify"
 LOG_FILE="$NOTIFY_DIR/notify.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+QUEUE_DIR="$RUNNERCTL_HOME/queue"
+SCHEDULER_DIR="$RUNNERCTL_HOME/scheduler"
 
 info(){ printf '[runnerctl-notify] %s\n' "$*"; }
 warn(){ printf '[runnerctl-notify] WARN: %s\n' "$*" >&2; }
@@ -24,6 +26,7 @@ Usage:
   runnerctl notify emit EVENT [--message TEXT] [--runner NAME]
   runnerctl notify enable RUNNER [--events LIST]
   runnerctl notify disable RUNNER
+  runnerctl notify doctor RUNNER [--json]
 
 Built-in providers:
   telegram   Telegram Bot API sendMessage
@@ -40,19 +43,17 @@ Provider contract:
   - RUNNERCTL_NOTIFY_MESSAGE contains the rendered text message
   - exit 0 on delivery success; non-zero on failure
 
-Secrets are read from environment variables and are never printed by status:
-  RUNNERCTL_TELEGRAM_BOT_TOKEN
-  RUNNERCTL_TELEGRAM_CHAT_ID
-  RUNNERCTL_LINE_CHANNEL_ACCESS_TOKEN
-  RUNNERCTL_LINE_TO
-  RUNNERCTL_WEBHOOK_URL
-  RUNNERCTL_WEBHOOK_AUTH_HEADER   optional complete HTTP header value
+Secrets are read from environment variables and are never printed by status/doctor.
 
-Optional provider selection:
-  RUNNERCTL_NOTIFY_PROVIDERS=telegram,line,webhook,custom-name
+Important hook semantics:
+  GitHub runs ACTIONS_RUNNER_HOOK_JOB_STARTED synchronously after assignment but
+  before workflow steps. `job.started` therefore means runner setup/assignment,
+  not that workflow steps have already begun.
 
-Job hook delivery is fail-open and uses short provider network timeouts.
-Manual `notify test` and `notify emit` return non-zero when delivery fails.
+Hook-driven delivery is fail-open. Built-in providers use short network timeouts.
+Custom executable providers are skipped in runner-hook mode by default because
+an unbounded plugin could freeze `Set up runner`. Explicit opt-in is available
+with RUNNERCTL_NOTIFY_ALLOW_CUSTOM_HOOK_PROVIDERS=1.
 EOF
 }
 
@@ -60,6 +61,7 @@ ensure_dirs(){ mkdir -p "$NOTIFY_DIR" "$RUNNER_CONFIG_DIR" "$HOOK_TARGET_DIR" "$
 json_quote(){ local v="${1:-}"; v="${v//\\/\\\\}"; v="${v//\"/\\\"}"; v="${v//$'\n'/\\n}"; v="${v//$'\r'/\\r}"; v="${v//$'\t'/\\t}"; printf '"%s"' "$v"; }
 now_utc(){ date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 host_name(){ hostname 2>/dev/null || printf unknown; }
+config_value(){ local f="$1" key="$2"; awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$f" 2>/dev/null || true; }
 
 find_hooks_helper(){
   local candidates=("${RUNNERCTL_HOOKS_HELPER:-}" "$SCRIPT_DIR/runnerctl-hooks" "$SCRIPT_DIR/../libexec/runnerctl-hooks" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-hooks") c
@@ -75,8 +77,7 @@ provider_path(){
       done
       ;;
   esac
-  c="$PLUGIN_DIR/$name"
-  [[ -x "$c" ]] && { printf '%s' "$c"; return 0; }
+  c="$PLUGIN_DIR/$name"; [[ -x "$c" ]] && { printf '%s' "$c"; return 0; }
   return 1
 }
 provider_configured(){
@@ -89,51 +90,76 @@ provider_configured(){
 }
 provider_names(){
   local explicit="${RUNNERCTL_NOTIFY_PROVIDERS:-}" p f
-  if [[ -n "$explicit" ]]; then
-    printf '%s' "$explicit" | tr ',' '\n' | awk 'NF && !seen[$0]++'
-    return
-  fi
+  if [[ -n "$explicit" ]]; then printf '%s' "$explicit" | tr ',' '\n' | awk 'NF && !seen[$0]++'; return; fi
   for p in telegram line webhook; do provider_configured "$p" && printf '%s\n' "$p"; done
-  shopt -s nullglob
-  for f in "$PLUGIN_DIR"/*; do [[ -x "$f" ]] && printf '%s\n' "$(basename "$f")"; done
+  shopt -s nullglob; for f in "$PLUGIN_DIR"/*; do [[ -x "$f" ]] && printf '%s\n' "$(basename "$f")"; done
 }
 
 runner_meta(){ local runner="$1" key="$2"; awk -F= -v k="$key" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$RUNNERS_DIR/$runner/.runnerctl-meta" 2>/dev/null || true; }
 runner_cfg(){ printf '%s/%s.conf' "$RUNNER_CONFIG_DIR" "$1"; }
-runner_enabled(){ local f; f="$(runner_cfg "$1")"; [[ -f "$f" ]] && [[ "$(awk -F= '$1=="enabled"{print $2;exit}' "$f" 2>/dev/null || true)" == true ]]; }
-runner_events(){ local f v; f="$(runner_cfg "$1")"; v="$(awk -F= '$1=="events"{sub(/^[^=]*=/,"");print;exit}' "$f" 2>/dev/null || true)"; printf '%s' "${v:-job.started,job.completed}"; }
+runner_enabled(){ local f; f="$(runner_cfg "$1")"; [[ -f "$f" ]] && [[ "$(config_value "$f" enabled)" == true ]]; }
+runner_events(){ local f v; f="$(runner_cfg "$1")"; v="$(config_value "$f" events)"; printf '%s' "${v:-job.started,job.completed}"; }
 event_allowed(){ local runner="$1" event="$2" events; runner_enabled "$runner" || return 1; events=",$(runner_events "$runner"),"; [[ "$events" == *",$event,"* || "$events" == *",*,"* ]]; }
 
+context_repo(){ local runner="$1" v="${GITHUB_REPOSITORY:-}"; [[ -n "$v" ]] || v="$(runner_meta "$runner" repo)"; printf '%s' "$v"; }
+context_branch(){
+  local v="${GITHUB_HEAD_REF:-}"
+  [[ -n "$v" ]] || v="${GITHUB_REF_NAME:-}"
+  if [[ -z "$v" ]]; then
+    v="${GITHUB_REF:-}"
+    v="${v#refs/heads/}"; v="${v#refs/tags/}"
+  fi
+  printf '%s' "$v"
+}
+context_sha(){ local v="${GITHUB_SHA:-}"; [[ ${#v} -le 12 ]] && printf '%s' "$v" || printf '%s' "${v:0:12}"; }
+context_run_url(){ local runner="$1" repo run_id server; repo="$(context_repo "$runner")"; run_id="${GITHUB_RUN_ID:-}"; server="${GITHUB_SERVER_URL:-https://github.com}"; [[ -n "$repo" && -n "$run_id" ]] && printf '%s/%s/actions/runs/%s' "$server" "$repo" "$run_id"; }
+
 build_event(){
-  local event="$1" runner="$2" message="$3" repo run_id run_attempt job workflow server run_url ts host
-  repo="${GITHUB_REPOSITORY:-}"; [[ -n "$repo" ]] || repo="$(runner_meta "$runner" repo)"
-  run_id="${GITHUB_RUN_ID:-}"; run_attempt="${GITHUB_RUN_ATTEMPT:-}"; job="${GITHUB_JOB:-}"; workflow="${GITHUB_WORKFLOW:-}"; server="${GITHUB_SERVER_URL:-https://github.com}"
-  run_url=""; [[ -n "$repo" && -n "$run_id" ]] && run_url="$server/$repo/actions/runs/$run_id"
-  ts="$(now_utc)"; host="$(host_name)"
+  local event="$1" runner="$2" message="$3" repo branch ref ref_type sha run_id run_attempt job workflow event_name actor server run_url ts host phase
+  repo="$(context_repo "$runner")"; branch="$(context_branch)"; ref="${GITHUB_REF:-}"; ref_type="${GITHUB_REF_TYPE:-}"; sha="$(context_sha)"
+  run_id="${GITHUB_RUN_ID:-}"; run_attempt="${GITHUB_RUN_ATTEMPT:-}"; job="${GITHUB_JOB:-}"; workflow="${GITHUB_WORKFLOW:-}"; event_name="${GITHUB_EVENT_NAME:-}"; actor="${GITHUB_ACTOR:-}"; server="${GITHUB_SERVER_URL:-https://github.com}"; run_url="$(context_run_url "$runner")"
+  ts="$(now_utc)"; host="$(host_name)"; phase=""; [[ "$event" == job.started ]] && phase="runner-assigned-before-steps"; [[ "$event" == job.completed ]] && phase="runner-completion-hook"
   printf '{"schema_version":1,"event":'; json_quote "$event"
+  printf ',"phase":'; json_quote "$phase"
   printf ',"timestamp":'; json_quote "$ts"
   printf ',"host":'; json_quote "$host"
   printf ',"runner":'; json_quote "$runner"
   printf ',"repository":'; json_quote "$repo"
+  printf ',"branch":'; json_quote "$branch"
+  printf ',"ref":'; json_quote "$ref"
+  printf ',"ref_type":'; json_quote "$ref_type"
+  printf ',"sha":'; json_quote "$sha"
   printf ',"run_id":'; json_quote "$run_id"
   printf ',"run_attempt":'; json_quote "$run_attempt"
   printf ',"job":'; json_quote "$job"
   printf ',"workflow":'; json_quote "$workflow"
+  printf ',"github_event":'; json_quote "$event_name"
+  printf ',"actor":'; json_quote "$actor"
+  printf ',"server_url":'; json_quote "$server"
   printf ',"run_url":'; json_quote "$run_url"
   printf ',"message":'; json_quote "$message"
   printf '}\n'
 }
 render_message(){
-  local event="$1" runner="$2" custom="$3" repo run_id job workflow
+  local event="$1" runner="$2" custom="$3" repo branch sha run_id attempt job workflow run_url title
   [[ -n "$custom" ]] && { printf '%s' "$custom"; return; }
-  repo="${GITHUB_REPOSITORY:-}"; [[ -n "$repo" ]] || repo="$(runner_meta "$runner" repo)"
-  run_id="${GITHUB_RUN_ID:-}"; job="${GITHUB_JOB:-}"; workflow="${GITHUB_WORKFLOW:-}"
-  printf '[runnerctl] %s' "$event"
+  repo="$(context_repo "$runner")"; branch="$(context_branch)"; sha="$(context_sha)"; run_id="${GITHUB_RUN_ID:-}"; attempt="${GITHUB_RUN_ATTEMPT:-}"; job="${GITHUB_JOB:-}"; workflow="${GITHUB_WORKFLOW:-}"; run_url="$(context_run_url "$runner")"
+  case "$event" in
+    job.started) title='runner assigned / setup started' ;;
+    job.completed) title='job completion hook' ;;
+    *) title="$event" ;;
+  esac
+  printf '[runnerctl] %s' "$title"
+  printf '\nevent: %s' "$event"
   [[ -z "$runner" ]] || printf '\nrunner: %s' "$runner"
   [[ -z "$repo" ]] || printf '\nrepo: %s' "$repo"
+  [[ -z "$branch" ]] || printf '\nbranch: %s' "$branch"
   [[ -z "$workflow" ]] || printf '\nworkflow: %s' "$workflow"
   [[ -z "$job" ]] || printf '\njob: %s' "$job"
-  [[ -z "$run_id" ]] || printf '\nrun: %s' "$run_id"
+  [[ -z "$sha" ]] || printf '\nsha: %s' "$sha"
+  if [[ -n "$run_id" ]]; then printf '\nrun: %s' "$run_id"; [[ -z "$attempt" ]] || printf ' (attempt %s)' "$attempt"; fi
+  [[ -z "$run_url" ]] || printf '\nurl: %s' "$run_url"
+  [[ "$event" != job.started ]] || printf '\nnote: workflow steps have not started yet; this is the synchronous runner setup hook.'
 }
 
 log_failure(){ ensure_dirs; printf '%s provider=%s event=%s delivery=failed\n' "$(now_utc)" "$1" "$2" >>"$LOG_FILE" 2>/dev/null || true; chmod 0600 "$LOG_FILE" 2>/dev/null || true; }
@@ -145,6 +171,10 @@ run_provider_once(){
       RUNNERCTL_NOTIFY_EVENT="$event" RUNNERCTL_NOTIFY_MESSAGE="$message" RUNNERCTL_NOTIFY_HOOK="${RUNNERCTL_NOTIFY_HOOK:-0}" bash "$path" <"$payload_file"
       ;;
     *)
+      if [[ "${RUNNERCTL_NOTIFY_HOOK:-0}" == 1 && "${RUNNERCTL_NOTIFY_ALLOW_CUSTOM_HOOK_PROVIDERS:-0}" != 1 ]]; then
+        warn "custom provider $provider skipped in synchronous runner hook; set RUNNERCTL_NOTIFY_ALLOW_CUSTOM_HOOK_PROVIDERS=1 to opt in"
+        return 0
+      fi
       RUNNERCTL_NOTIFY_EVENT="$event" RUNNERCTL_NOTIFY_MESSAGE="$message" RUNNERCTL_NOTIFY_HOOK="${RUNNERCTL_NOTIFY_HOOK:-0}" "$path" <"$payload_file"
       ;;
   esac
@@ -152,48 +182,30 @@ run_provider_once(){
 run_provider(){
   local provider="$1" event="$2" message="$3" payload_file="$4" attempts=2 i
   [[ "${RUNNERCTL_NOTIFY_HOOK:-0}" == 1 ]] && attempts=1
-  for ((i=1;i<=attempts;i++)); do
-    if run_provider_once "$provider" "$event" "$message" "$payload_file"; then return 0; fi
-    (( i < attempts )) && sleep 1
-  done
-  log_failure "$provider" "$event"
-  return 1
+  for ((i=1;i<=attempts;i++)); do if run_provider_once "$provider" "$event" "$message" "$payload_file"; then return 0; fi; (( i < attempts )) && sleep 1; done
+  log_failure "$provider" "$event"; return 1
 }
 dispatch_event(){
   local event="$1" runner="$2" custom="$3" provider_filter="${4:-}" message payload_file provider any=0 failures=0 rc=0
-  ensure_dirs
-  message="$(render_message "$event" "$runner" "$custom")"
-  payload_file="$(mktemp "$NOTIFY_DIR/event.XXXXXX")"
+  ensure_dirs; message="$(render_message "$event" "$runner" "$custom")"; payload_file="$(mktemp "$NOTIFY_DIR/event.XXXXXX")"
   build_event "$event" "$runner" "$message" >"$payload_file"; chmod 0600 "$payload_file"
   while IFS= read -r provider; do
-    [[ -n "$provider" ]] || continue
-    [[ -z "$provider_filter" || "$provider_filter" == "$provider" ]] || continue
-    any=1
+    [[ -n "$provider" ]] || continue; [[ -z "$provider_filter" || "$provider_filter" == "$provider" ]] || continue; any=1
     if ! provider_configured "$provider"; then warn "provider $provider is not configured"; failures=$((failures+1)); continue; fi
     run_provider "$provider" "$event" "$message" "$payload_file" || failures=$((failures+1))
   done < <(provider_names)
-  if [[ "$any" -eq 0 ]]; then warn "no configured notification providers selected"; rc=1
-  elif [[ "$failures" -ne 0 ]]; then rc=1
-  fi
-  rm -f "$payload_file"
-  return "$rc"
+  if [[ "$any" -eq 0 ]]; then warn "no configured notification providers selected"; rc=1; elif [[ "$failures" -ne 0 ]]; then rc=1; fi
+  rm -f "$payload_file"; return "$rc"
 }
 
 restart_runner(){
-  local d="$1"
-  [[ "${RUNNERCTL_SKIP_SERVICE_RESTART:-0}" == 1 ]] && return 0
+  local d="$1"; [[ "${RUNNERCTL_SKIP_SERVICE_RESTART:-0}" == 1 ]] && return 0
   [[ -x "$d/svc.sh" && -f "$d/.service" ]] || { warn "runner $(basename "$d") needs a manual restart for hook changes"; return 0; }
-  if [[ "$(uname -s)" == Linux ]]; then
-    (cd "$d" && sudo ./svc.sh stop >/dev/null 2>&1 || true); (cd "$d" && sudo ./svc.sh start >/dev/null)
-  else
-    (cd "$d" && ./svc.sh stop >/dev/null 2>&1 || true); (cd "$d" && ./svc.sh start >/dev/null)
-  fi
+  if [[ "$(uname -s)" == Linux ]]; then (cd "$d" && sudo ./svc.sh stop >/dev/null 2>&1 || true); (cd "$d" && sudo ./svc.sh start >/dev/null); else (cd "$d" && ./svc.sh stop >/dev/null 2>&1 || true); (cd "$d" && ./svc.sh start >/dev/null); fi
 }
 write_hook_target(){
   local runner="$1" phase="$2" target self
-  target="$HOOK_TARGET_DIR/$runner-$phase.sh"
-  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-  mkdir -p "$HOOK_TARGET_DIR"
+  target="$HOOK_TARGET_DIR/$runner-$phase.sh"; self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"; mkdir -p "$HOOK_TARGET_DIR"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set +e
@@ -204,8 +216,7 @@ EOF
 }
 cmd_enable(){
   local runner="${1:-}" events="job.started,job.completed" hooks started completed d
-  [[ -n "$runner" ]] || die "notify enable requires RUNNER"; shift || true
-  [[ -f "$RUNNERS_DIR/$runner/.runnerctl-meta" ]] || die "Unknown runner: $runner"
+  [[ -n "$runner" ]] || die "notify enable requires RUNNER"; shift || true; [[ -f "$RUNNERS_DIR/$runner/.runnerctl-meta" ]] || die "Unknown runner: $runner"
   while [[ $# -gt 0 ]]; do case "$1" in --events) events="${2:-}"; shift 2 ;; *) die "unknown notify enable option: $1" ;; esac; done
   [[ "$events" =~ ^[A-Za-z0-9.*_-]+(,[A-Za-z0-9.*_-]+)*$ ]] || die "--events must be a comma-separated event list"
   ensure_dirs; printf 'enabled=true\nevents=%s\n' "$events" >"$(runner_cfg "$runner")"; chmod 0600 "$(runner_cfg "$runner")"
@@ -213,48 +224,61 @@ cmd_enable(){
   RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" register "$runner" started notify "$started" >/dev/null
   RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" register "$runner" completed notify "$completed" >/dev/null
   d="$RUNNERS_DIR/$runner"; restart_runner "$d"; info "notifications enabled for $runner (events=$events)"
+  if [[ "$(config_value "$QUEUE_DIR/config" enabled)" == true && ",$events," == *",job.started,"* ]]; then warn "legacy queue is enabled; job.started can be followed by a hidden Set up runner wait. Prefer runnerctl scheduler."; fi
 }
 cmd_disable(){
-  local runner="${1:-}" hooks d
-  [[ -n "$runner" && $# -eq 1 ]] || die "notify disable requires RUNNER"
+  local runner="${1:-}" hooks d; [[ -n "$runner" && $# -eq 1 ]] || die "notify disable requires RUNNER"
   hooks="$(find_hooks_helper)"; RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" unregister "$runner" started notify >/dev/null 2>&1 || true; RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" unregister "$runner" completed notify >/dev/null 2>&1 || true
-  rm -f "$(runner_cfg "$runner")" "$HOOK_TARGET_DIR/$runner-started.sh" "$HOOK_TARGET_DIR/$runner-completed.sh"
-  d="$RUNNERS_DIR/$runner"; [[ -d "$d" ]] && restart_runner "$d"; info "notifications disabled for $runner"
+  rm -f "$(runner_cfg "$runner")" "$HOOK_TARGET_DIR/$runner-started.sh" "$HOOK_TARGET_DIR/$runner-completed.sh"; d="$RUNNERS_DIR/$runner"; [[ -d "$d" ]] && restart_runner "$d"; info "notifications disabled for $runner"
 }
 cmd_hook(){
-  local runner="${1:-}" phase="${2:-}" event
-  [[ -n "$runner" && ( "$phase" == started || "$phase" == completed ) ]] || exit 0
+  local runner="${1:-}" phase="${2:-}" event; [[ -n "$runner" && ( "$phase" == started || "$phase" == completed ) ]] || exit 0
   event="job.$phase"; event_allowed "$runner" "$event" || exit 0
-  if ! dispatch_event "$event" "$runner" "" ""; then warn "job notification delivery failed (fail-open)"; fi
-  exit 0
+  if ! dispatch_event "$event" "$runner" "" ""; then warn "job notification delivery failed (fail-open)"; fi; exit 0
 }
 
 providers_json(){
-  local first=true p path configured=false
-  printf '['
-  for p in telegram line webhook; do
-    [[ "$first" == true ]] || printf ','; first=false; provider_configured "$p" && configured=true || configured=false
-    printf '{"name":'; json_quote "$p"; printf ',"builtin":true,"configured":%s}' "$configured"
-  done
-  shopt -s nullglob
-  for path in "$PLUGIN_DIR"/*; do [[ -x "$path" ]] || continue; p="$(basename "$path")"; [[ "$first" == true ]] || printf ','; first=false; printf '{"name":'; json_quote "$p"; printf ',"builtin":false,"configured":true}' ; done
-  printf ']'
+  local first=true p path configured=false; printf '['
+  for p in telegram line webhook; do [[ "$first" == true ]] || printf ','; first=false; provider_configured "$p" && configured=true || configured=false; printf '{"name":'; json_quote "$p"; printf ',"builtin":true,"configured":%s}' "$configured"; done
+  shopt -s nullglob; for path in "$PLUGIN_DIR"/*; do [[ -x "$path" ]] || continue; p="$(basename "$path")"; [[ "$first" == true ]] || printf ','; first=false; printf '{"name":'; json_quote "$p"; printf ',"builtin":false,"configured":true}'; done; printf ']'
 }
 cmd_providers(){ local json=0 p; [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "providers accepts only --json"; ensure_dirs; if [[ "$json" -eq 1 ]]; then providers_json; printf '\n'; return; fi; printf 'Notification providers\n'; for p in telegram line webhook; do printf '  %-12s builtin  configured=%s\n' "$p" "$(provider_configured "$p" && printf yes || printf no)"; done; shopt -s nullglob; for p in "$PLUGIN_DIR"/*; do [[ -x "$p" ]] && printf '  %-12s plugin   configured=yes\n' "$(basename "$p")"; done; }
 cmd_status(){
-  local json=0 configured=0 enabled=0 d runner events
-  [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "status accepts only --json"; ensure_dirs
-  shopt -s nullglob; for d in "$RUNNER_CONFIG_DIR"/*.conf; do configured=$((configured+1)); [[ "$(awk -F= '$1=="enabled"{print $2;exit}' "$d")" == true ]] && enabled=$((enabled+1)); done
+  local json=0 configured=0 enabled=0 d runner events; [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "status accepts only --json"; ensure_dirs
+  shopt -s nullglob; for d in "$RUNNER_CONFIG_DIR"/*.conf; do configured=$((configured+1)); [[ "$(config_value "$d" enabled)" == true ]] && enabled=$((enabled+1)); done
   if [[ "$json" -eq 1 ]]; then printf '{"configured_runners":%s,"enabled_runners":%s,"providers":' "$configured" "$enabled"; providers_json; printf ',"runners":['; local first=true; for d in "$RUNNER_CONFIG_DIR"/*.conf; do runner="$(basename "$d" .conf)"; events="$(runner_events "$runner")"; [[ "$first" == true ]] || printf ','; first=false; printf '{"runner":'; json_quote "$runner"; printf ',"enabled":%s,"events":' "$(runner_enabled "$runner" && printf true || printf false)"; json_quote "$events"; printf '}'; done; printf ']}\n'; else printf 'Notifications\n  configured runners: %s\n  enabled runners:    %s\n' "$configured" "$enabled"; cmd_providers; fi
 }
-cmd_test(){
-  local provider=""; case "${1:-}" in --provider) provider="${2:-}"; shift 2 ;; --all|"") [[ "${1:-}" == --all ]] && shift ;; *) die "test accepts --provider NAME or --all" ;; esac; [[ $# -eq 0 ]] || die "unexpected notify test arguments"; dispatch_event notification.test "" "runnerctl notification test" "$provider"
+
+list_handlers(){
+  local runner phase dir f
+  runner="$1"
+  phase="$2"
+  dir="$RUNNERCTL_HOME/hooks/$runner/$phase.d"
+  [[ -d "$dir" ]] || return 0
+  shopt -s nullglob
+  for f in "$dir"/*.sh; do basename "$f" .sh; done
 }
-cmd_emit(){
-  local event="${1:-}" message="" runner=""; [[ -n "$event" ]] || die "notify emit requires EVENT"; shift || true
-  while [[ $# -gt 0 ]]; do case "$1" in --message) message="${2:-}"; shift 2 ;; --runner) runner="${2:-}"; shift 2 ;; *) die "unknown notify emit option: $1" ;; esac; done
-  [[ "$event" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid event name"; dispatch_event "$event" "$runner" "$message" ""
+cmd_doctor(){
+  local runner="${1:-}" json=0 d started completed queue_enabled=false queue_drained=false queue_max=1 queue_wait=300 scheduler_enabled=false events warnings="" handlers_started handlers_completed
+  [[ -n "$runner" ]] || die "notify doctor requires RUNNER"; shift || true; [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die "notify doctor accepts RUNNER [--json]"; d="$RUNNERS_DIR/$runner"; [[ -f "$d/.runnerctl-meta" ]] || die "Unknown runner: $runner"
+  started="$(config_value "$d/.env" ACTIONS_RUNNER_HOOK_JOB_STARTED)"; completed="$(config_value "$d/.env" ACTIONS_RUNNER_HOOK_JOB_COMPLETED)"; events="$(runner_events "$runner")"
+  [[ "$(config_value "$QUEUE_DIR/config" enabled)" == true ]] && queue_enabled=true; [[ "$(config_value "$QUEUE_DIR/config" drained)" == true ]] && queue_drained=true; queue_max="$(config_value "$QUEUE_DIR/config" max_concurrency)"; [[ "$queue_max" =~ ^[1-9][0-9]*$ ]] || queue_max=1
+  queue_wait="$(config_value "$QUEUE_DIR/safety" max_wait_seconds)"; [[ "$queue_wait" =~ ^[1-9][0-9]*$ ]] || queue_wait=300
+  [[ "$(config_value "$SCHEDULER_DIR/config" enabled)" == true ]] && scheduler_enabled=true
+  handlers_started="$(list_handlers "$runner" started | paste -sd, - 2>/dev/null || true)"; handlers_completed="$(list_handlers "$runner" completed | paste -sd, - 2>/dev/null || true)"
+  if [[ "$queue_enabled" == true ]]; then warnings="legacy queue is enabled; GitHub Set up runner may wait up to ${queue_wait}s; prefer runnerctl scheduler"; fi
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"runner":'; json_quote "$runner"; printf ',"notification_enabled":%s,"events":' "$(runner_enabled "$runner" && printf true || printf false)"; json_quote "$events"
+    printf ',"started_dispatcher":'; json_quote "$started"; printf ',"completed_dispatcher":'; json_quote "$completed"; printf ',"started_handlers":'; json_quote "$handlers_started"; printf ',"completed_handlers":'; json_quote "$handlers_completed"
+    printf ',"legacy_queue":{"enabled":%s,"drained":%s,"max_concurrency":%s,"max_wait_seconds":%s},"scheduler":{"enabled":%s},"notification_log":' "$queue_enabled" "$queue_drained" "$queue_max" "$queue_wait" "$scheduler_enabled"; json_quote "$LOG_FILE"; printf ',"warning":'; json_quote "$warnings"; printf '}\n'
+  else
+    printf 'Notification / hook doctor\n  runner:              %s\n  notifications:       %s\n  events:              %s\n  started dispatcher:  %s\n  started handlers:    %s\n  completed handlers:  %s\n' "$runner" "$(runner_enabled "$runner" && printf enabled || printf disabled)" "$events" "${started:-none}" "${handlers_started:-none}" "${handlers_completed:-none}"
+    printf '  legacy queue:        %s (drained=%s, max=%s, max_wait=%ss)\n  scheduler:           %s\n  notification log:    %s\n' "$queue_enabled" "$queue_drained" "$queue_max" "$queue_wait" "$scheduler_enabled" "$LOG_FILE"
+    [[ -z "$warnings" ]] || printf '\nWARNING: %s\n' "$warnings"
+  fi
 }
+cmd_test(){ local provider=""; case "${1:-}" in --provider) provider="${2:-}"; shift 2 ;; --all|"") [[ "${1:-}" == --all ]] && shift ;; *) die "test accepts --provider NAME or --all" ;; esac; [[ $# -eq 0 ]] || die "unexpected notify test arguments"; dispatch_event notification.test "" "runnerctl notification test" "$provider"; }
+cmd_emit(){ local event="${1:-}" message="" runner=""; [[ -n "$event" ]] || die "notify emit requires EVENT"; shift || true; while [[ $# -gt 0 ]]; do case "$1" in --message) message="${2:-}"; shift 2 ;; --runner) runner="${2:-}"; shift 2 ;; *) die "unknown notify emit option: $1" ;; esac; done; [[ "$event" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid event name"; dispatch_event "$event" "$runner" "$message" ""; }
 
 main(){
   local cmd="${1:-help}"; shift || true
@@ -265,6 +289,7 @@ main(){
     emit) cmd_emit "$@" ;;
     enable) cmd_enable "$@" ;;
     disable) cmd_disable "$@" ;;
+    doctor) cmd_doctor "$@" ;;
     hook) cmd_hook "$@" ;;
     help|--help|-h|"") usage ;;
     *) die "unknown notify command: $cmd" ;;

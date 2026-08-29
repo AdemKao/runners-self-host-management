@@ -2,6 +2,11 @@
 set -euo pipefail
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+QUEUE_DIR="$RUNNERCTL_HOME/queue"
+HOOKS_DIR="$RUNNERCTL_HOME/hooks"
+SAFETY_FILE="$QUEUE_DIR/safety"
+DEFAULT_MAX_WAIT_SECONDS=300
+
 find_legacy(){
   local candidates=(
     "${RUNNERCTL_QUEUE_LEGACY_HELPER:-}"
@@ -18,7 +23,125 @@ find_legacy(){
   printf 'runnerctl-queue: legacy queue helper not found; reinstall runnerctl\n' >&2
   exit 1
 }
+
 scheduler_enabled(){ local f="$RUNNERCTL_HOME/scheduler/config"; [[ -f "$f" ]] || return 1; [[ "$(awk -F= '$1=="enabled"{print $2;exit}' "$f" 2>/dev/null || true)" == true ]]; }
+
+max_wait_seconds(){
+  local value="${RUNNERCTL_QUEUE_MAX_WAIT_SECONDS:-}"
+  if [[ -z "$value" && -f "$SAFETY_FILE" ]]; then
+    value="$(awk -F= '$1=="max_wait_seconds"{print $2;exit}' "$SAFETY_FILE" 2>/dev/null || true)"
+  fi
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || value="$DEFAULT_MAX_WAIT_SECONDS"
+  printf '%s' "$value"
+}
+
+write_safety(){
+  local value="$1" tmp
+  mkdir -p "$QUEUE_DIR"
+  tmp="$(mktemp)"
+  printf 'max_wait_seconds=%s\n' "$value" >"$tmp"
+  mv "$tmp" "$SAFETY_FILE"
+}
+
+harden_runner_hook(){
+  local runner="$1" target legacy max patched
+  target="$HOOKS_DIR/$runner/queue-start.sh"
+  legacy="$HOOKS_DIR/$runner/queue-start.legacy.sh"
+  [[ -f "$target" ]] || return 0
+  max="$(max_wait_seconds)"
+
+  if grep -q '^# runnerctl legacy queue watchdog$' "$target" 2>/dev/null; then
+    return 0
+  fi
+  mv "$target" "$legacy"
+
+  # The legacy hook records $PPID as the job worker PID. Once wrapped, its
+  # direct parent is the watchdog, which exits after admission. Preserve the
+  # watchdog's own parent (the real dispatcher/worker process) instead so stale
+  # slot recovery does not immediately reclaim a valid active slot.
+  patched="$legacy.tmp"
+  sed 's/"\$PPID"/"${RUNNERCTL_QUEUE_WORKER_PID:-$PPID}"/g' "$legacy" >"$patched"
+  mv "$patched" "$legacy"
+  chmod 0755 "$legacy"
+
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+# runnerctl legacy queue watchdog
+set -u
+runner="$runner"
+queue_dir="$QUEUE_DIR"
+legacy="$legacy"
+max_wait="$max"
+child=""
+child_running(){
+  local p
+  for p in \$(jobs -pr); do
+    [[ "\$p" == "\$child" ]] && return 0
+  done
+  return 1
+}
+cleanup(){
+  if [[ -n "\${child:-}" ]]; then
+    kill -TERM "\$child" 2>/dev/null || true
+    sleep 0.2
+    kill -KILL "\$child" 2>/dev/null || true
+    wait "\$child" 2>/dev/null || true
+  fi
+  rm -f "\$queue_dir/waiting/\$runner-"*.wait "\$queue_dir/slots/\$runner.slot" 2>/dev/null || true
+}
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 129' HUP
+RUNNERCTL_QUEUE_WORKER_PID="\$PPID" "\$legacy" "\$@" &
+child=\$!
+started=\$(date +%s)
+while child_running; do
+  now=\$(date +%s)
+  if (( now - started >= max_wait )); then
+    printf '[runnerctl-queue] ERROR: legacy admission wait exceeded %ss for %s; aborting Set up runner. Use runnerctl scheduler for GitHub-native queued jobs.\\n' "\$max_wait" "\$runner" >&2
+    cleanup
+    exit 124
+  fi
+  sleep 1
+done
+wait "\$child"
+exit \$?
+EOF
+  chmod 0755 "$target"
+}
+
+harden_all_hooks(){
+  local d
+  [[ -d "$RUNNERCTL_HOME/runners" ]] || return 0
+  shopt -s nullglob
+  for d in "$RUNNERCTL_HOME/runners"/*; do
+    [[ -f "$d/.runnerctl-meta" ]] || continue
+    harden_runner_hook "$(basename "$d")"
+  done
+}
+
+cleanup_watchdogs(){
+  local f
+  shopt -s nullglob
+  for f in "$HOOKS_DIR"/*/queue-start.legacy.sh; do rm -f "$f"; done
+  rm -f "$SAFETY_FILE"
+}
+
+print_status(){
+  local json=0 output max
+  [[ "${1:-}" == --json ]] && json=1
+  output="$(bash "$(find_legacy)" status "$@")"
+  max="$(max_wait_seconds)"
+  if [[ "$json" -eq 1 ]]; then
+    printf '%s' "${output%?}"
+    printf ',"max_wait_seconds":%s,"mode":"legacy-admission-gate"}\n' "$max"
+  else
+    printf '%s\n' "$output"
+    printf '  max wait seconds:   %s\n' "$max"
+    printf '\nWARNING: legacy queue waits inside GitHub Set up runner. Prefer runnerctl scheduler.\n'
+  fi
+}
+
 case "${1:-}" in
   help|--help|-h|"")
     cat <<'EOF'
@@ -28,6 +151,11 @@ This command blocks inside the GitHub runner job-start hook after GitHub has
 already assigned the job. Waiting jobs therefore appear as "in progress", and
 the waiting time can consume part of `timeout-minutes`.
 
+v0.7.2 safety behavior:
+  - cancellation signals terminate the hidden wait and clean local wait/slot state
+  - waits are bounded (default 300 seconds)
+  - override before `queue enable` with RUNNERCTL_QUEUE_MAX_WAIT_SECONDS=N
+
 For GitHub-native queued semantics use:
   runnerctl scheduler --help
 
@@ -36,7 +164,23 @@ EOF
     ;;
   enable)
     if scheduler_enabled; then printf '[runnerctl-queue] ERROR: GitHub-native scheduler is enabled; disable it before enabling the legacy queue gate.\n' >&2; exit 1; fi
-    exec bash "$(find_legacy)" "$@"
+    max="$(max_wait_seconds)"
+    write_safety "$max"
+    bash "$(find_legacy)" "$@"
+    harden_all_hooks
+    printf '[runnerctl-queue] WARNING: legacy admission gate enabled with max hidden wait %ss. Prefer runnerctl scheduler for GitHub-native queued state.\n' "$max" >&2
+    ;;
+  attach)
+    bash "$(find_legacy)" "$@"
+    [[ $# -eq 2 ]] && harden_runner_hook "$2" || true
+    ;;
+  status)
+    shift || true
+    print_status "$@"
+    ;;
+  disable)
+    bash "$(find_legacy)" "$@"
+    cleanup_watchdogs
     ;;
   *) exec bash "$(find_legacy)" "$@" ;;
 esac

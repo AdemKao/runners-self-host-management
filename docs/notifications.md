@@ -1,18 +1,17 @@
 # runnerctl notifications and integrations
 
-`runnerctl notify` adds outbound operational notifications without coupling the runner manager to one messaging vendor.
+`runnerctl notify` adds outbound operational notifications without coupling runner management to one messaging vendor.
 
-v0.6.0 supports:
+Current built-in providers:
 
-- Telegram Bot API notifications
-- LINE Messaging API push notifications
-- generic JSON webhooks
+- Telegram Bot API
+- LINE Messaging API
+- generic JSON webhook
 - executable third-party notification providers
-- job started/completed hooks
-- scheduler control-plane events
-- local provider/configuration status queries
 
-The notification layer is optional. Existing runner, cleanup, legacy queue, and scheduler behavior continues to work when no notification provider is configured.
+Current event sources include runner job hooks and scheduler control-plane events.
+
+The notification layer is optional. Existing runner, cleanup, queue, scheduler, and Bot/API behavior continues to work when no provider is configured.
 
 ## Architecture
 
@@ -33,13 +32,41 @@ GitHub Actions runner / runnerctl scheduler
        +---------------- custom executable plugins
 ```
 
-The core event schema is provider-independent. Built-in providers and third-party plugins receive the same event information.
+The core event schema is provider-independent. Consumers should ignore unknown JSON fields so future runnerctl versions can add context without breaking integrations.
 
-## Important delivery semantics
+## Critical runner-hook semantics
 
-GitHub self-hosted runner started/completed hooks are synchronous. A slow notification hook must not delay or fail a CI job.
+GitHub self-hosted runner started/completed hooks are **synchronous**.
 
-runnerctl therefore uses these rules:
+`ACTIONS_RUNNER_HOOK_JOB_STARTED` runs after GitHub has assigned a job to a runner but before workflow steps begin. GitHub does not provide a built-in timeout for this hook.
+
+Therefore runnerctl keeps the compatibility event identifier:
+
+```text
+job.started
+```
+
+but human-readable notifications describe it as:
+
+```text
+runner assigned / setup started
+```
+
+A v0.7.2 started message also contains:
+
+```text
+note: workflow steps have not started yet; this is the synchronous runner setup hook.
+```
+
+Do not interpret `job.started` as proof that build/test/deploy steps have started executing.
+
+`ACTIONS_RUNNER_HOOK_JOB_COMPLETED` runs after workflow steps, before GitHub has fully finalized the job. runnerctl therefore emits `job.completed`, not `job.succeeded` or `job.failed`.
+
+For authoritative final conclusions, use a future/event-controller integration based on GitHub `workflow_job` events rather than guessing inside runner hooks.
+
+## Delivery reliability
+
+runnerctl uses these rules:
 
 - hook-driven notifications are **fail-open**;
 - built-in providers use a short connect timeout (default 2 seconds);
@@ -47,13 +74,29 @@ runnerctl therefore uses these rules:
 - hook delivery performs one attempt;
 - manual `notify test` / `notify emit` may retry once and return non-zero if delivery still fails;
 - notification failures are recorded without credentials;
-- provider credentials are never printed by `status` or `providers`.
+- provider credentials are never printed by `status`, `providers`, or `doctor`.
 
-Override timeouts only when necessary:
+Override built-in HTTP timeouts only when necessary:
 
 ```bash
 export RUNNERCTL_NOTIFY_CONNECT_TIMEOUT=2
 export RUNNERCTL_NOTIFY_TOTAL_TIMEOUT=4
+```
+
+### Custom providers inside runner hooks
+
+Manual custom-provider delivery remains supported:
+
+```bash
+runnerctl notify emit custom.event --message "hello"
+```
+
+However, v0.7.2 skips executable custom providers by default when invoked from the synchronous GitHub runner hook. A third-party executable has no guaranteed runtime bound and could otherwise freeze GitHub `Set up runner` indefinitely.
+
+If a custom provider has been independently audited and has its own hard timeout, an operator may explicitly opt in:
+
+```bash
+export RUNNERCTL_NOTIFY_ALLOW_CUSTOM_HOOK_PROVIDERS=1
 ```
 
 ## Commands
@@ -75,11 +118,96 @@ runnerctl notify emit deployment.completed --message "production deployment comp
 runnerctl notify enable RUNNER
 runnerctl notify enable RUNNER --events job.started,job.completed
 runnerctl notify disable RUNNER
+
+runnerctl notify doctor RUNNER
+runnerctl notify doctor RUNNER --json
 ```
 
-### Provider selection
+## Operator diagnostics
 
-When `RUNNERCTL_NOTIFY_PROVIDERS` is unset, built-in providers with complete configuration and executable custom plugins are selected automatically.
+Use `notify doctor` when a job appears stuck at `Set up runner`, when notifications fire but workflow steps do not begin, or when you need to inspect hook composition.
+
+```bash
+runnerctl notify doctor example-runner-01
+```
+
+The command reports without returning secrets:
+
+- notification enabled state and event filter;
+- started/completed dispatcher paths;
+- registered started/completed handler names in execution order;
+- legacy queue enabled/drained state;
+- legacy queue max concurrency and max hidden wait;
+- GitHub-native scheduler enabled state;
+- notification failure log path;
+- warnings for dangerous combinations.
+
+A common warning is:
+
+```text
+legacy queue is enabled; GitHub Set up runner may wait up to 300s; prefer runnerctl scheduler
+```
+
+Also inspect:
+
+```bash
+runnerctl queue status --json
+runnerctl scheduler status --json
+```
+
+If you intended to use the scheduler, disable the deprecated host-side gate:
+
+```bash
+runnerctl queue disable
+```
+
+## Event context
+
+Job notification JSON includes GitHub context when available from the runner-hook environment:
+
+- `event`
+- `phase`
+- `timestamp`
+- `host`
+- `runner`
+- `repository`
+- `branch`
+- `ref`
+- `ref_type`
+- short `sha`
+- `run_id`
+- `run_attempt`
+- `job`
+- `workflow`
+- `github_event`
+- `actor`
+- `server_url`
+- `run_url`
+- `message`
+
+For pull requests, runnerctl prefers `GITHUB_HEAD_REF` so the source branch is shown instead of only the synthetic pull-request merge ref.
+
+runnerctl deliberately does not perform another GitHub API request from the synchronous start hook just to resolve a display job name. The stable `GITHUB_JOB` id and clickable Actions run URL are used instead.
+
+Example started notification:
+
+```text
+[runnerctl] runner assigned / setup started
+event: job.started
+runner: example-runner-01
+repo: example-org/example-repo
+branch: feature/example-change
+workflow: CI
+job: build_and_test
+sha: 0123456789ab
+run: 98765 (attempt 2)
+url: https://github.com/example-org/example-repo/actions/runs/98765
+note: workflow steps have not started yet; this is the synchronous runner setup hook.
+```
+
+## Provider selection
+
+When `RUNNERCTL_NOTIFY_PROVIDERS` is unset, built-in providers with complete configuration and executable custom plugins are discovered automatically for manual delivery.
 
 To restrict delivery:
 
@@ -87,54 +215,44 @@ To restrict delivery:
 export RUNNERCTL_NOTIFY_PROVIDERS=telegram,webhook
 ```
 
-The value is a comma-separated provider list.
+## Job lifecycle notifications
 
-## Events
-
-### Job lifecycle
-
-When notifications are enabled for a runner, runnerctl composes notification handlers into the existing shared GitHub runner hook dispatcher.
-
-Supported v0.6 job events:
-
-- `job.started`
-- `job.completed`
-
-Example:
+Enable:
 
 ```bash
-runnerctl notify enable oracle-ci-01 \
+runnerctl notify enable example-runner-01 \
   --events job.started,job.completed
 ```
 
-The hook event contains runner/repository/run/job/workflow information when GitHub exposes those environment variables to the runner hook.
+runnerctl:
 
-### Important: completion is not the final GitHub conclusion
+1. writes a per-runner notification event filter;
+2. creates fail-open started/completed handlers;
+3. registers them with the shared `runnerctl-hooks` dispatcher;
+4. preserves cleanup/legacy-queue handlers already using that dispatcher;
+5. restarts the managed runner service when possible because runner `.env` hook changes are loaded on restart.
 
-`ACTIONS_RUNNER_HOOK_JOB_COMPLETED` runs after workflow steps but before GitHub has fully finalized the job. v0.6 therefore emits `job.completed`, not `job.succeeded` or `job.failed`.
+If the deprecated legacy queue is enabled, `notify enable` warns that `job.started` may be followed by a local `Set up runner` wait. Prefer the GitHub-native scheduler for production queueing.
 
-runnerctl deliberately does **not** guess a final conclusion.
+Disable:
 
-For exact success/failure notifications, a future event controller should consume GitHub `workflow_job` webhook events, where the final conclusion is authoritative.
+```bash
+runnerctl notify disable example-runner-01
+```
 
-### Scheduler events
+## Scheduler events
 
-The v0.6 frontend emits these control-plane events after successful scheduler commands:
+runnerctl emits best-effort notifications for:
 
 - `scheduler.enabled`
 - `scheduler.disabled`
 - `scheduler.drained`
 - `scheduler.resumed`
-
-A failing scheduler control command attempts to emit:
-
 - `scheduler.error`
 
-Notification delivery never changes the scheduler command's own exit status.
+Notification delivery never changes the scheduler command's own success/failure status.
 
 ## Telegram setup
-
-Telegram uses the Bot API `sendMessage` method.
 
 Required environment variables:
 
@@ -143,30 +261,17 @@ export RUNNERCTL_TELEGRAM_BOT_TOKEN='...'
 export RUNNERCTL_TELEGRAM_CHAT_ID='...'
 ```
 
-Recommended setup:
-
-1. Create/manage a Telegram bot using Telegram's official bot management flow.
-2. Add/start the bot in the target private chat, group, supergroup, or channel as appropriate.
-3. Obtain the target chat ID using Telegram's Bot API/update tooling.
-4. Store the bot token outside shell history and source code.
-5. Export the token and chat ID to the runner service environment.
-6. Test delivery:
+Test:
 
 ```bash
 runnerctl notify test --provider telegram
 ```
 
-Official Bot API reference:
+`RUNNERCTL_TELEGRAM_CHAT_ID` is the outbound destination. See `docs/telegram-chat-id.md` and `docs/telegram-chat-id.zh-TW.md` for private-chat and group/supergroup setup.
 
-- https://core.telegram.org/bots/api
-
-### Telegram security note
-
-The bot token authorizes Bot API calls. Treat it like a password. Do not commit it to a workflow, repository, `.runnerctl-meta`, notification config, or support ticket.
+Treat the bot token like a password. Do not commit it to workflows, source code, `.runnerctl-meta`, support tickets, or diagnostic output.
 
 ## LINE Messaging API setup
-
-LINE notifications use the Messaging API push-message endpoint.
 
 Required environment variables:
 
@@ -175,30 +280,15 @@ export RUNNERCTL_LINE_CHANNEL_ACCESS_TOKEN='...'
 export RUNNERCTL_LINE_TO='U...'
 ```
 
-`RUNNERCTL_LINE_TO` can be a supported Messaging API destination such as a user/group/room ID, subject to LINE's push-message conditions.
-
-Recommended setup:
-
-1. Create/configure a LINE Messaging API channel and Official Account.
-2. Issue an appropriate channel access token.
-3. Obtain the target user/group/room ID from your Messaging API integration/webhook events.
-4. Ensure the destination meets LINE's conditions for receiving push messages.
-5. Store the channel access token outside source code.
-6. Test delivery:
+Test:
 
 ```bash
 runnerctl notify test --provider line
 ```
 
-Official LINE documentation:
+`RUNNERCTL_LINE_TO` must be a destination supported by the LINE Messaging API and the account/channel relationship must satisfy LINE's push-message conditions.
 
-- https://developers.line.biz/en/reference/messaging-api/
-- https://developers.line.biz/en/docs/messaging-api/sending-messages/
-- https://developers.line.biz/en/docs/basics/channel-access-token/
-
-### LINE security note
-
-A channel access token authorizes Messaging API operations. Revoke and replace it if exposure is suspected.
+Treat the channel access token like a password and revoke/replace it if exposure is suspected.
 
 ## Generic webhook provider
 
@@ -208,7 +298,7 @@ Required:
 export RUNNERCTL_WEBHOOK_URL='https://example.com/hooks/runnerctl'
 ```
 
-Optional complete authorization/header value:
+Optional authorization header:
 
 ```bash
 export RUNNERCTL_WEBHOOK_AUTH_HEADER='Authorization: Bearer ...'
@@ -222,26 +312,30 @@ runnerctl notify test --provider webhook
 
 The webhook receives `Content-Type: application/json` and the runnerctl event object.
 
-Example event:
+Example:
 
 ```json
 {
   "schema_version": 1,
-  "event": "job.completed",
-  "timestamp": "2026-08-22T12:34:56Z",
+  "event": "job.started",
+  "phase": "runner-assigned-before-steps",
   "host": "oracle-ci-01",
-  "runner": "billing-runner-01",
+  "runner": "example-runner-01",
   "repository": "example-org/example-repo",
-  "run_id": "123456789",
-  "run_attempt": "1",
-  "job": "test",
+  "branch": "feature/example-change",
+  "ref": "refs/pull/123/merge",
+  "ref_type": "branch",
+  "sha": "0123456789ab",
+  "run_id": "98765",
+  "run_attempt": "2",
+  "job": "build_and_test",
   "workflow": "CI",
-  "run_url": "https://github.com/example-org/example-repo/actions/runs/123456789",
-  "message": "[runnerctl] job.completed ..."
+  "run_url": "https://github.com/example-org/example-repo/actions/runs/98765",
+  "message": "[runnerctl] runner assigned / setup started ..."
 }
 ```
 
-`schema_version` is intended to make provider integrations forward-compatible. Consumers should ignore unknown fields.
+`schema_version` remains `1`; fields are additive. Consumers should ignore unknown fields.
 
 ## Custom provider plugins
 
@@ -251,22 +345,21 @@ Custom notification providers are executable files in:
 $RUNNERCTL_HOME/plugins/notify/NAME
 ```
 
-Provider contract:
+Contract:
 
-- event JSON is provided on stdin;
+- event JSON on stdin;
 - `RUNNERCTL_NOTIFY_EVENT` contains the event name;
-- `RUNNERCTL_NOTIFY_MESSAGE` contains the human-readable rendered message;
+- `RUNNERCTL_NOTIFY_MESSAGE` contains the human-readable message;
 - exit `0` means delivery succeeded;
 - non-zero means delivery failed.
 
-Example shell provider:
+Example:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 payload="$(cat)"
-# Send $payload to your integration.
-# Never echo credentials.
+# Deliver $payload using a bounded client.
 ```
 
 Make it executable:
@@ -277,137 +370,88 @@ export RUNNERCTL_NOTIFY_PROVIDERS=my-provider
 runnerctl notify test --provider my-provider
 ```
 
-A plugin should implement its own short network timeout. Hook-driven calls set:
-
-```text
-RUNNERCTL_NOTIFY_HOOK=1
-```
-
-Plugins can use this signal to disable long retries during runner hooks.
-
 ## Secret handling
 
-runnerctl does not store provider tokens in its normal configuration files.
+runnerctl does not intentionally persist provider tokens in its normal configuration files.
 
-Recommended options:
+Recommended storage:
 
-- a protected service-manager environment file (`chmod 600`);
-- a secret manager that injects environment variables into the runner service;
+- protected service-manager environment file (`chmod 600`);
+- secret manager injecting environment variables into the runner service;
 - protected host-level environment configuration.
 
 Avoid:
 
-- command-line token arguments;
-- committing `.env` files with tokens;
-- embedding tokens in GitHub workflow YAML;
-- logging environment variables during CI;
-- sharing `RUNNERCTL_WEBHOOK_AUTH_HEADER`, Telegram bot tokens, or LINE channel tokens in diagnostics.
+- token command-line arguments;
+- committing secret `.env` files;
+- workflow YAML containing provider credentials;
+- dumping environment variables in CI logs.
 
-`runnerctl notify status --json` reports whether built-in provider credentials appear configured but does not return their values.
+Remember: a token exported only in an interactive SSH shell may work for `runnerctl notify test` but not for runner hooks. The runner service must receive the provider environment variables.
 
-## Enabling runner job notifications
-
-```bash
-runnerctl notify enable my-runner \
-  --events job.started,job.completed
-```
-
-runnerctl:
-
-1. writes a per-runner notification event filter;
-2. creates fail-open started/completed handlers;
-3. registers them with `runnerctl-hooks`;
-4. preserves cleanup/queue handlers already using the shared dispatcher;
-5. restarts the managed runner service when possible because GitHub runner `.env` hook changes require a restart.
-
-If automatic restart is unavailable, runnerctl prints a manual-restart warning.
-
-Disable:
+## Monitoring and failure log
 
 ```bash
-runnerctl notify disable my-runner
-```
-
-## Monitoring and queries
-
-Local operational query:
-
-```bash
-runnerctl notify status
 runnerctl notify status --json
+runnerctl notify doctor RUNNER --json
 ```
 
-This shows configured runners, event filters, and whether built-in providers have the required environment variables. Secrets are never returned.
-
-This v0.6 feature is **not** a metrics database and does not retain a complete job history. Provider failures are appended to:
+Provider failures are appended to:
 
 ```text
 $RUNNERCTL_HOME/notify/notify.log
 ```
 
-Only provider name/event/failure metadata is written; credentials are not intentionally logged.
-
-## Why Telegram/LINE `/status` commands are not in v0.6
-
-Outbound notifications and inbound bot commands have different security and lifecycle requirements.
-
-An inbound Telegram bot can use long polling or a webhook. An inbound LINE bot requires Messaging API webhook handling. That introduces:
-
-- a long-running bot/API controller;
-- request signature/authentication validation;
-- user/chat authorization rules;
-- replay/rate-limit handling;
-- potentially a public HTTPS endpoint;
-- command permissions for operational data/actions.
-
-v0.6 intentionally ships the provider/event foundation first. A later bot-controller/API layer can consume `runnerctl ... --json` commands safely without redesigning outbound notifications.
+Only provider/event/failure metadata is written; credentials are not intentionally logged.
 
 ## Troubleshooting
 
+### Notification arrives, then GitHub is stuck at Set up runner
+
+Run:
+
+```bash
+runnerctl notify doctor RUNNER
+runnerctl queue status --json
+runnerctl scheduler status --json
+```
+
+If legacy queue is enabled, that local admission gate can wait after the notification because GitHub has already assigned the job. v0.7.2 bounds that wait and makes cancellation deterministic, but the recommended fix is to migrate queueing to `runnerctl scheduler`.
+
 ### `provider ... is not configured`
 
-Check the required environment variables in the same service/user environment where runnerctl runs:
+Check:
 
 ```bash
 runnerctl notify providers
 ```
 
-Do not print token values while debugging.
+Do not print credential values while debugging.
 
-### Test fails but job continues
+### Manual test fails but a job continues
 
-Expected. Manual `notify test` returns non-zero for diagnostics. Job hooks are fail-open by design.
+Expected. Manual `notify test` is fail-closed for diagnostics; runner hooks are fail-open.
 
 ### Hooks do not fire
 
-After `notify enable`, verify the runner service was restarted. GitHub runner hook environment changes are loaded on restart.
+After `notify enable`, make sure the runner service restarted. GitHub runner `.env` hook changes are loaded on restart.
 
-Also inspect:
+### Telegram destination receives nothing
 
-```bash
-runnerctl notify status
-runnerctl cleanup status
-runnerctl queue status
-```
-
-The shared hook composer allows notification, cleanup, and legacy queue handlers to coexist.
+Verify chat ID, bot membership/permissions, service environment, and token. See the Telegram Chat ID guides in `docs/`.
 
 ### LINE returns success but no user receives a message
 
-Review LINE's documented push-message delivery conditions, friend/block status, and destination ID.
-
-### Telegram destination does not receive a message
-
-Verify the target chat ID, bot membership/permissions, and bot token.
+Review destination ID, Official Account relationship, friend/block state, and LINE's push-message delivery conditions.
 
 ## Rollback
 
-For each runner:
+Disable notifications per runner:
 
 ```bash
 runnerctl notify disable RUNNER
 ```
 
-Then remove provider environment variables from the runner service environment and restart the service if necessary.
+Remove provider environment variables from the runner service environment and restart if necessary.
 
-No repository workflow changes are required to use or remove v0.6 notifications.
+If rolling back runnerctl itself from v0.7.2, be aware that older versions restore the unbounded legacy queue-start wait. Prefer disabling `runnerctl queue` and using the scheduler rather than relying on the old admission gate.
