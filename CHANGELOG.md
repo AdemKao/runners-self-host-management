@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-29
+
+### Fixed
+- Legacy `runnerctl queue` started-hook waits are now guarded by a watchdog instead of being able to remain hidden in GitHub `Set up runner` indefinitely.
+- TERM/INT/HUP cancellation now terminates the legacy queue child wait and cleans runner waiting/slot state.
+- Legacy queue waits default to a 300-second safety limit, configurable with `RUNNERCTL_QUEUE_MAX_WAIT_SECONDS` before `queue enable`.
+- `job.started` notifications no longer imply that workflow steps are already executing; rendered text now describes runner assignment/setup semantics.
+- Telegram/LINE notification text now includes repository, branch/ref, workflow, GitHub job id, short SHA, run attempt, and a clickable GitHub Actions run URL.
+- Webhook/plugin event JSON now includes branch/ref/SHA/navigation metadata and an explicit phase for runner-start and completion hooks.
+
+### Added
+- `runnerctl notify doctor RUNNER [--json]` for inspecting hook dispatchers, handler order, notification events, legacy queue state/max wait, scheduler state, warnings, and notification log location without exposing credentials.
+- Regression coverage for queue cancellation, bounded max-wait behavior, actionable notification context, and custom-provider hook safety.
+- Dedicated v0.7.2 release notes with immediate recovery and scheduler migration guidance.
+
+### Security / reliability
+- Custom executable notification providers are skipped by default in synchronous GitHub runner hooks so an unbounded third-party plugin cannot freeze `Set up runner`; explicit audited opt-in is available through `RUNNERCTL_NOTIFY_ALLOW_CUSTOM_HOOK_PROVIDERS=1`.
+- Built-in Telegram, LINE, and webhook providers remain bounded by short network timeouts and notification hooks remain fail-open.
+
+### Compatibility / limitations
+- The event identifier `job.started` is preserved for compatibility, but it means the synchronous runner setup hook has started, not that workflow steps are already running.
+- `runnerctl queue` remains compatibility mode and can still place assigned jobs in GitHub `in progress` / `Set up runner`; `runnerctl scheduler` remains the recommended GitHub-native queued-state mechanism.
+
 ## [0.7.1] - 2026-08-23
 
 ### Added
@@ -216,7 +239,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The project began with the initial `runnerctl` implementation for managing multiple GitHub Actions self-hosted runners on one host, including runner registration, service lifecycle management, logs, removal, environment diagnostics, installation tooling, CI, and local isolation guidance.
 
-[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.2
 [0.7.1]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.1
 [0.7.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.0
 [0.6.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.6.0
