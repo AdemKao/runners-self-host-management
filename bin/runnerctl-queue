@@ -44,7 +44,7 @@ write_safety(){
 }
 
 harden_runner_hook(){
-  local runner="$1" target legacy max
+  local runner="$1" target legacy max patched
   target="$HOOKS_DIR/$runner/queue-start.sh"
   legacy="$HOOKS_DIR/$runner/queue-start.legacy.sh"
   [[ -f "$target" ]] || return 0
@@ -54,7 +54,16 @@ harden_runner_hook(){
     return 0
   fi
   mv "$target" "$legacy"
+
+  # The legacy hook records $PPID as the job worker PID. Once wrapped, its
+  # direct parent is the watchdog, which exits after admission. Preserve the
+  # watchdog's own parent (the real dispatcher/worker process) instead so stale
+  # slot recovery does not immediately reclaim a valid active slot.
+  patched="$legacy.tmp"
+  sed 's/"\$PPID"/"${RUNNERCTL_QUEUE_WORKER_PID:-$PPID}"/g' "$legacy" >"$patched"
+  mv "$patched" "$legacy"
   chmod 0755 "$legacy"
+
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 # runnerctl legacy queue watchdog
@@ -76,7 +85,7 @@ cleanup(){
 trap 'cleanup; exit 143' TERM
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 129' HUP
-"\$legacy" "\$@" &
+RUNNERCTL_QUEUE_WORKER_PID="\$PPID" "\$legacy" "\$@" &
 child=\$!
 started=\$(date +%s)
 while kill -0 "\$child" 2>/dev/null; do
@@ -135,7 +144,7 @@ This command blocks inside the GitHub runner job-start hook after GitHub has
 already assigned the job. Waiting jobs therefore appear as "in progress", and
 the waiting time can consume part of `timeout-minutes`.
 
-v0.6.1 safety behavior:
+v0.7.2 safety behavior:
   - cancellation signals terminate the hidden wait and clean local wait/slot state
   - waits are bounded (default 300 seconds)
   - override before `queue enable` with RUNNERCTL_QUEUE_MAX_WAIT_SECONDS=N
