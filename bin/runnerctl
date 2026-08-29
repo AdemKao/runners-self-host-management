@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-VERSION="0.7.1"
+VERSION="0.7.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 find_legacy(){
   local candidates=("${RUNNERCTL_CORE_LEGACY:-}" "$SCRIPT_DIR/runnerctl-legacy" "$SCRIPT_DIR/runnerctl-core-legacy" "$SCRIPT_DIR/../libexec/runnerctl-core-legacy" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-core-legacy") candidate
