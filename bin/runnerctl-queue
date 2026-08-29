@@ -73,8 +73,15 @@ queue_dir="$QUEUE_DIR"
 legacy="$legacy"
 max_wait="$max"
 child=""
+child_running(){
+  local p
+  for p in \$(jobs -pr); do
+    [[ "\$p" == "\$child" ]] && return 0
+  done
+  return 1
+}
 cleanup(){
-  if [[ -n "\${child:-}" ]] && kill -0 "\$child" 2>/dev/null; then
+  if [[ -n "\${child:-}" ]]; then
     kill -TERM "\$child" 2>/dev/null || true
     sleep 0.2
     kill -KILL "\$child" 2>/dev/null || true
@@ -88,7 +95,7 @@ trap 'cleanup; exit 129' HUP
 RUNNERCTL_QUEUE_WORKER_PID="\$PPID" "\$legacy" "\$@" &
 child=\$!
 started=\$(date +%s)
-while kill -0 "\$child" 2>/dev/null; do
+while child_running; do
   now=\$(date +%s)
   if (( now - started >= max_wait )); then
     printf '[runnerctl-queue] ERROR: legacy admission wait exceeded %ss for %s; aborting Set up runner. Use runnerctl scheduler for GitHub-native queued jobs.\\n' "\$max_wait" "\$runner" >&2
