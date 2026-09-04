@@ -42,7 +42,14 @@ Read-only Bot/API controller:
   bot telegram run    long-poll Telegram and send read-only query replies
   bot serve           serve authenticated read-only API + signed LINE webhook
 
-Remote mutating commands are intentionally not exposed in v0.7.x.
+Host disk hygiene:
+  cleanup host status       read-only host/Docker storage inspection
+  cleanup host policy       read-only cleanup policy inspection
+  cleanup host configure    mutates local host-cleanup policy only
+  cleanup host run --dry-run read-only cleanup plan with no Docker mutation
+  cleanup host run          destructive host maintenance; requires explicit policy enable
+
+Remote mutating commands are intentionally not exposed by the Bot/API controller.
 EOF
 }
 agent_json(){
@@ -54,6 +61,11 @@ agent_json(){
       print "    \"bot query\": {\"effect\": \"read-only\", \"json\": true},"
       print "    \"bot telegram run\": {\"effect\": \"read-only-network-with-external-replies\"},"
       print "    \"bot serve\": {\"effect\": \"read-only-http-controller\"},"
+      print "    \"cleanup host status\": {\"effect\": \"read-only-host-diagnostics\", \"json\": true},"
+      print "    \"cleanup host policy\": {\"effect\": \"read-only-local\", \"json\": true},"
+      print "    \"cleanup host configure\": {\"effect\": \"mutating-local-config\"},"
+      print "    \"cleanup host run --dry-run\": {\"effect\": \"read-only-host-maintenance-plan\", \"json\": true},"
+      print "    \"cleanup host run\": {\"effect\": \"destructive-docker-host-maintenance\", \"json\": true},"
       added=1; next
     }
     { print }
