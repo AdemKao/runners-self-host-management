@@ -53,6 +53,7 @@ jobs:
           bash -n tests/notify.sh
           bash -n tests/launchd-status.sh
           bash -n tests/cleanup.sh
+          bash -n tests/host-cleanup.sh
           bash -n tests/doctor.sh
           bash -n tests/host.sh
           bash -n tests/ci-check.sh
@@ -62,7 +63,7 @@ jobs:
       - name: Run smoke tests
         run: bash tests/smoke.sh
 
-      - name: Run v0.7 installer regression tests
+      - name: Run v0.8 installer regression tests
         run: bash tests/installer.sh
 
       - name: Run GitHub-native scheduler regression tests
@@ -74,8 +75,11 @@ jobs:
       - name: Run read-only bot/API controller regression tests
         run: python3 tests/test_bot_controller.py
 
-      - name: Run cleanup regression tests
+      - name: Run workspace cleanup regression tests
         run: bash tests/cleanup.sh
+
+      - name: Run host disk hygiene regression tests
+        run: bash tests/host-cleanup.sh
 
       - name: Run doctor regression tests
         run: bash tests/doctor.sh
