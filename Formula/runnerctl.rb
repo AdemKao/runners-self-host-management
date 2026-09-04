@@ -47,15 +47,17 @@ class Runnerctl < Formula
   end
 
   test do
-    assert_equal "0.7.2", shell_output("#{bin}/runnerctl version").strip
+    assert_equal "0.8.0", shell_output("#{bin}/runnerctl version").strip
     assert_match "AI AGENT", shell_output("#{bin}/runnerctl --help")
     assert_match "GitHub-native scheduling", shell_output("#{bin}/runnerctl --help")
     assert_match "Notifications and integrations", shell_output("#{bin}/runnerctl --help")
     assert_match "Read-only Bot/API controller", shell_output("#{bin}/runnerctl --help")
+    assert_match "Host disk hygiene", shell_output("#{bin}/runnerctl cleanup --help")
+    assert_match '"min_free_gb":10', shell_output("#{bin}/runnerctl cleanup host policy --json")
     assert_match "Legacy host-side admission gate", shell_output("#{bin}/runnerctl queue --help")
     assert_match "GitHub-native scheduler", shell_output("#{bin}/runnerctl scheduler --help")
     assert_match "Notification providers", shell_output("#{bin}/runnerctl notify providers")
     assert_match '"enabled":false', shell_output("#{bin}/runnerctl scheduler status --json")
-    assert_match '"current_version":"0.7.2"', shell_output("RUNNERCTL_LATEST_VERSION=0.7.2 RUNNERCTL_INSTALL_METHOD=homebrew #{bin}/runnerctl upgrade --check --json")
+    assert_match '"current_version":"0.8.0"', shell_output("RUNNERCTL_LATEST_VERSION=0.8.0 RUNNERCTL_INSTALL_METHOD=homebrew #{bin}/runnerctl upgrade --check --json")
   end
 end
