@@ -4,27 +4,70 @@ set -euo pipefail
 RUNNERCTL_HOME="${RUNNERCTL_HOME:-$HOME/.local/share/runnerctl}"
 RUNNERS_DIR="$RUNNERCTL_HOME/runners"
 HOOKS_DIR="$RUNNERCTL_HOME/hooks"
+CLEANUP_DIR="$RUNNERCTL_HOME/cleanup"
+HOST_POLICY_FILE="$CLEANUP_DIR/host-policy"
+HOST_LOCK_DIR="$CLEANUP_DIR/host.lock"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_MIN_FREE_GB=10
+DEFAULT_IMAGE_RETENTION_HOURS=168
+DEFAULT_BUILD_CACHE_RETENTION_HOURS=72
 
 info(){ printf '[runnerctl] %s\n' "$*"; }
 warn(){ printf '[runnerctl] WARN: %s\n' "$*" >&2; }
 die(){ printf '[runnerctl] ERROR: %s\n' "$*" >&2; exit 1; }
+die_code(){ local code="$1"; shift; printf '[runnerctl] ERROR: %s\n' "$*" >&2; exit "$code"; }
 
 usage(){
   cat <<'EOF'
-Manage automatic self-hosted runner workspace cleanup.
+Manage runner workspace cleanup and explicit host disk hygiene.
 
-Usage:
+Workspace cleanup:
   runnerctl cleanup status [RUNNER] [--json]
   runnerctl cleanup enable RUNNER
   runnerctl cleanup enable-all
   runnerctl cleanup disable RUNNER
   runnerctl cleanup run RUNNER [--dry-run]
 
-The post-job hook deletes only GITHUB_WORKSPACE. Package-manager caches,
-Docker data, and runner logs are preserved. runnerctl composes cleanup with
-other runnerctl-managed completion hooks such as the global queue.
+Host disk hygiene:
+  runnerctl cleanup host status [--json]
+  runnerctl cleanup host policy [--json]
+  runnerctl cleanup host configure [--enable|--disable]
+      [--min-free-gb N]
+      [--image-retention-hours N]
+      [--build-cache-retention-hours N]
+  runnerctl cleanup host run --dry-run [--json]
+  runnerctl cleanup host run [--json]
+
+Workspace cleanup and host cleanup are intentionally separate. Post-job hooks
+remove only a validated GITHUB_WORKSPACE. Host cleanup is never attached to a
+job hook and is disabled by default.
+
+Host cleanup safety:
+  - never prunes Docker volumes;
+  - never runs `docker system prune`;
+  - uses age-filtered `docker image prune -a` and `docker builder prune`;
+  - Docker preserves images referenced by existing containers;
+  - mutation defers while Runner.Worker, Docker build activity, or running
+    containers are detected;
+  - mutation is serialized by a host-wide lock;
+  - cleanup runs only when Docker-root free space is below the configured target.
+
+Host cleanup exit codes:
+  0 success, dry-run, or no cleanup needed
+  2 invalid/disabled policy or usage
+  3 cleanup completed but free-space target is still unmet
+  4 cleanup deferred because host activity is detected
+  5 Docker is unavailable or a Docker operation failed
+  6 another host cleanup holds the lock
+  7 host/Docker accounting could not be determined safely
 EOF
+}
+
+json_quote(){
+  local value="${1:-}"
+  value="${value//\\/\\\\}"; value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"; value="${value//$'\r'/\\r}"; value="${value//$'\t'/\\t}"
+  printf '"%s"' "$value"
 }
 
 runner_dir(){ printf '%s/%s' "$RUNNERS_DIR" "$1"; }
@@ -65,31 +108,44 @@ restart_service(){
   fi
 }
 
+canonical_dir(){
+  local path="$1"
+  [[ -d "$path" ]] || return 1
+  (cd -P -- "$path" 2>/dev/null && pwd -P)
+}
+
+validate_workspace_path(){
+  local d="$1" workspace_path="$2" root root_real workspace_real
+  root="$d/_work"
+  [[ -n "$workspace_path" && -d "$workspace_path" ]] || return 10
+  [[ ! -L "$workspace_path" ]] || return 11
+  root_real="$(canonical_dir "$root")" || return 12
+  workspace_real="$(canonical_dir "$workspace_path")" || return 13
+  [[ "$workspace_real" != "$root_real" ]] || return 14
+  case "$workspace_real" in
+    "$root_real"/*) printf '%s' "$workspace_real" ;;
+    *) return 15 ;;
+  esac
+}
+
+self_path(){ local dir; dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"; printf '%s/%s' "$dir" "$(basename "${BASH_SOURCE[0]}")"; }
+
 write_hook(){
-  local n="$1" d="$2" h root
-  h="$(hook_path "$n")"; root="$d/_work"
+  local n="$1" h self
+  h="$(hook_path "$n")"; self="$(self_path)"
   mkdir -p "$(dirname "$h")"
-  cat >"$h" <<EOF
-#!/usr/bin/env bash
-set -u
-workspace="\${GITHUB_WORKSPACE:-}"
-root="$root"
-[[ -n "\$workspace" ]] || exit 0
-case "\$workspace" in "\$root"/*) ;; *) printf '[runnerctl-cleanup] refusing path: %s\\n' "\$workspace" >&2; exit 0;; esac
-[[ -d "\$workspace" ]] || exit 0
-before="\$(du -sk "\$workspace" 2>/dev/null | awk '{print \$1}' || printf 0)"
-find "\$workspace" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || printf '[runnerctl-cleanup] partial cleanup failure\\n' >&2
-after="\$(du -sk "\$workspace" 2>/dev/null | awk '{print \$1}' || printf 0)"
-printf '[runnerctl-cleanup] cleaned %s (before=%sKB after=%sKB)\\n' "\$workspace" "\$before" "\$after"
-exit 0
-EOF
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set +e\n'
+    printf 'RUNNERCTL_HOME=%q exec bash %q _hook-workspace %q\n' "$RUNNERCTL_HOME" "$self" "$n"
+  } >"$h"
   chmod 0755 "$h"
 }
 
 enable_one(){
   local n="$1" d h hooks
   d="$(require_runner "$n")"; h="$(hook_path "$n")"; hooks="$(find_hooks_helper)"
-  write_hook "$n" "$d"
+  write_hook "$n"
   RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" register "$n" completed cleanup "$h" >/dev/null
   restart_service "$d"
   info "Automatic workspace cleanup enabled: $n"
@@ -99,7 +155,7 @@ disable_one(){
   local n="$1" d h hooks
   d="$(require_runner "$n")"; h="$(hook_path "$n")"; hooks="$(find_hooks_helper)"
   RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" unregister "$n" completed cleanup >/dev/null
-  rm -f "$h"
+  rm -f -- "$h"
   restart_service "$d"
   info "Automatic workspace cleanup disabled: $n"
 }
@@ -107,12 +163,16 @@ disable_one(){
 workspace(){
   local d="$1" repo name
   repo="$(meta_get "$d" repo)"; [[ "$repo" == */* ]] || return 1
-  name="${repo#*/}"; printf '%s/_work/%s/%s' "$d" "$name" "$name"
+  name="${repo#*/}"; [[ -n "$name" && "$name" != */* && "$name" != . && "$name" != .. ]] || return 1
+  printf '%s/_work/%s/%s' "$d" "$name" "$name"
 }
 
 workspace_kb(){
-  local w; w="$(workspace "$1" 2>/dev/null || true)"
-  [[ -d "$w" ]] && du -sk "$w" 2>/dev/null | awk '{print $1}' || printf 0
+  local d="$1" w validated
+  w="$(workspace "$d" 2>/dev/null || true)"
+  [[ -n "$w" && -d "$w" ]] || { printf 0; return; }
+  validated="$(validate_workspace_path "$d" "$w" 2>/dev/null || true)"
+  [[ -n "$validated" ]] && du -sk "$validated" 2>/dev/null | awk '{print $1}' || printf 0
 }
 
 status_one(){
@@ -120,7 +180,7 @@ status_one(){
   d="$(require_runner "$n")"; h="$(hook_path "$n")"; hooks="$(find_hooks_helper)"; kb="$(workspace_kb "$d")"
   if [[ -f "$h" ]] && RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" has "$n" completed cleanup >/dev/null 2>&1; then enabled=true; fi
   if [[ "$json" -eq 1 ]]; then
-    printf '{"name":"%s","enabled":%s,"workspace_kb":%s}\n' "$n" "$enabled" "$kb"
+    printf '{"name":'; json_quote "$n"; printf ',"enabled":%s,"workspace_kb":%s}\n' "$enabled" "$kb"
   else
     printf '%-38s %-10s %sKB\n' "$n" "$([[ "$enabled" == true ]] && echo enabled || echo disabled)" "$kb"
   fi
@@ -143,13 +203,368 @@ status_all(){
   fi
 }
 
+clean_validated_workspace(){
+  local n="$1" workspace_path="$2" d validated before after
+  d="$(require_runner "$n")"
+  if ! validated="$(validate_workspace_path "$d" "$workspace_path")"; then
+    warn "refusing unsafe workspace path for $n"
+    return 20
+  fi
+  before="$(du -sk "$validated" 2>/dev/null | awk '{print $1}' || printf 0)"
+  if ! find "$validated" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; then
+    warn "partial workspace cleanup failure for $n"
+    return 21
+  fi
+  after="$(du -sk "$validated" 2>/dev/null | awk '{print $1}' || printf 0)"
+  printf '[runnerctl-cleanup] cleaned %s (before=%sKB after=%sKB)\n' "$validated" "$before" "$after"
+}
+
 run_one(){
-  local n="$1" dry="$2" d w kb
-  d="$(require_runner "$n")"; w="$(workspace "$d")" || die "Cannot resolve workspace for $n"; kb="$(workspace_kb "$d")"
-  [[ "$dry" -eq 0 ]] || { printf '%s\t%sKB\n' "$w" "$kb"; return; }
+  local n="$1" dry="$2" d w validated kb
+  d="$(require_runner "$n")"; w="$(workspace "$d")" || die "Cannot resolve workspace for $n"
   [[ -d "$w" ]] || { info "Workspace already absent: $w"; return; }
-  find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-  info "Workspace cleaned: $w (${kb}KB before cleanup)"
+  validated="$(validate_workspace_path "$d" "$w")" || die_code 7 "Refusing unsafe workspace path for $n"
+  kb="$(du -sk "$validated" 2>/dev/null | awk '{print $1}' || printf 0)"
+  [[ "$dry" -eq 0 ]] || { printf '%s\t%sKB\n' "$validated" "$kb"; return; }
+  find "$validated" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+  info "Workspace cleaned: $validated (${kb}KB before cleanup)"
+}
+
+hook_workspace(){
+  local n="$1" d workspace_path
+  d="$(require_runner "$n")"
+  workspace_path="${GITHUB_WORKSPACE:-}"
+  [[ -n "$workspace_path" ]] || exit 0
+  if ! clean_validated_workspace "$n" "$workspace_path"; then
+    warn "workspace cleanup failed safely for $n"
+    exit 1
+  fi
+}
+
+ensure_cleanup_dir(){ mkdir -p "$CLEANUP_DIR"; chmod 0700 "$CLEANUP_DIR" 2>/dev/null || true; }
+
+policy_defaults(){
+  POLICY_ENABLED=false
+  POLICY_MIN_FREE_GB="$DEFAULT_MIN_FREE_GB"
+  POLICY_IMAGE_HOURS="$DEFAULT_IMAGE_RETENTION_HOURS"
+  POLICY_CACHE_HOURS="$DEFAULT_BUILD_CACHE_RETENTION_HOURS"
+  POLICY_VALID=true
+  POLICY_ERROR=""
+}
+
+policy_load(){
+  local key value
+  policy_defaults
+  [[ -f "$HOST_POLICY_FILE" ]] || return 0
+  while IFS='=' read -r key value; do
+    case "$key" in
+      enabled) POLICY_ENABLED="$value" ;;
+      min_free_gb) POLICY_MIN_FREE_GB="$value" ;;
+      image_retention_hours) POLICY_IMAGE_HOURS="$value" ;;
+      build_cache_retention_hours) POLICY_CACHE_HOURS="$value" ;;
+      ""|'#'*) ;;
+      *) POLICY_VALID=false; POLICY_ERROR="unknown policy key: $key" ;;
+    esac
+  done <"$HOST_POLICY_FILE"
+  [[ "$POLICY_ENABLED" == true || "$POLICY_ENABLED" == false ]] || { POLICY_VALID=false; POLICY_ERROR="invalid enabled value"; }
+  [[ "$POLICY_MIN_FREE_GB" =~ ^[1-9][0-9]*$ ]] || { POLICY_VALID=false; POLICY_ERROR="invalid min_free_gb"; }
+  [[ "$POLICY_IMAGE_HOURS" =~ ^[1-9][0-9]*$ ]] || { POLICY_VALID=false; POLICY_ERROR="invalid image_retention_hours"; }
+  [[ "$POLICY_CACHE_HOURS" =~ ^[1-9][0-9]*$ ]] || { POLICY_VALID=false; POLICY_ERROR="invalid build_cache_retention_hours"; }
+}
+
+policy_write(){
+  local tmp
+  ensure_cleanup_dir
+  tmp="$(mktemp "$CLEANUP_DIR/host-policy.XXXXXX")"
+  chmod 0600 "$tmp"
+  printf 'enabled=%s\nmin_free_gb=%s\nimage_retention_hours=%s\nbuild_cache_retention_hours=%s\n' \
+    "$POLICY_ENABLED" "$POLICY_MIN_FREE_GB" "$POLICY_IMAGE_HOURS" "$POLICY_CACHE_HOURS" >"$tmp"
+  mv "$tmp" "$HOST_POLICY_FILE"
+  chmod 0600 "$HOST_POLICY_FILE"
+}
+
+print_policy(){
+  local json="$1"
+  policy_load
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"enabled":%s,"min_free_gb":%s,"image_retention_hours":%s,"build_cache_retention_hours":%s,"valid":%s,"error":' \
+      "$POLICY_ENABLED" "$POLICY_MIN_FREE_GB" "$POLICY_IMAGE_HOURS" "$POLICY_CACHE_HOURS" "$POLICY_VALID"
+    json_quote "$POLICY_ERROR"; printf '}\n'
+  else
+    printf 'Host cleanup policy\n'
+    printf '  enabled:                     %s\n' "$POLICY_ENABLED"
+    printf '  minimum free space:          %s GiB\n' "$POLICY_MIN_FREE_GB"
+    printf '  image retention:             %s hours\n' "$POLICY_IMAGE_HOURS"
+    printf '  build-cache retention:       %s hours\n' "$POLICY_CACHE_HOURS"
+    printf '  valid:                       %s\n' "$POLICY_VALID"
+    [[ -z "$POLICY_ERROR" ]] || printf '  error:                       %s\n' "$POLICY_ERROR"
+  fi
+}
+
+host_configure(){
+  local changed=0 mode=""
+  policy_load
+  [[ "$POLICY_VALID" == true ]] || die_code 2 "Cannot update malformed host cleanup policy: $POLICY_ERROR"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --enable) [[ "$mode" != disable ]] || die_code 2 "--enable and --disable are mutually exclusive"; POLICY_ENABLED=true; mode=enable; changed=1; shift ;;
+      --disable) [[ "$mode" != enable ]] || die_code 2 "--enable and --disable are mutually exclusive"; POLICY_ENABLED=false; mode=disable; changed=1; shift ;;
+      --min-free-gb) [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || die_code 2 "--min-free-gb requires a positive integer"; POLICY_MIN_FREE_GB="$2"; changed=1; shift 2 ;;
+      --image-retention-hours) [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || die_code 2 "--image-retention-hours requires a positive integer"; POLICY_IMAGE_HOURS="$2"; changed=1; shift 2 ;;
+      --build-cache-retention-hours) [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || die_code 2 "--build-cache-retention-hours requires a positive integer"; POLICY_CACHE_HOURS="$2"; changed=1; shift 2 ;;
+      *) die_code 2 "Unknown host configure option: $1" ;;
+    esac
+  done
+  [[ "$changed" -eq 1 ]] || die_code 2 "cleanup host configure requires at least one option"
+  policy_write
+  print_policy 0
+}
+
+existing_df_target(){
+  local path="$1"
+  while [[ ! -e "$path" && "$path" != / ]]; do path="$(dirname "$path")"; done
+  printf '%s' "$path"
+}
+
+df_stats(){
+  local path="$1" target
+  target="$(existing_df_target "$path")"
+  if [[ -n "${RUNNERCTL_CLEANUP_DF_FILE:-}" && -r "$RUNNERCTL_CLEANUP_DF_FILE" ]]; then
+    awk -F'\t' -v p="$target" '$1==p {print $2, $3, $4; found=1; exit} END{if(!found) exit 1}' "$RUNNERCTL_CLEANUP_DF_FILE"
+    return
+  fi
+  df -Pk "$target" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $2, $4, $5; exit}'
+}
+
+workspace_total_kb(){
+  local d root real total=0 kb seen="|"
+  shopt -s nullglob
+  for d in "$RUNNERS_DIR"/*; do
+    [[ -f "$d/.runnerctl-meta" && -d "$d/_work" ]] || continue
+    root="$d/_work"; real="$(canonical_dir "$root" 2>/dev/null || true)"; [[ -n "$real" ]] || continue
+    case "$seen" in *"|$real|"*) continue ;; esac
+    seen="${seen}${real}|"
+    kb="$(du -sk "$real" 2>/dev/null | awk '{print $1}' || printf 0)"
+    [[ "$kb" =~ ^[0-9]+$ ]] || kb=0
+    total=$((total + kb))
+  done
+  printf '%s' "$total"
+}
+
+process_snapshot(){
+  if [[ -n "${RUNNERCTL_CLEANUP_PS_FILE:-}" ]]; then
+    [[ -r "$RUNNERCTL_CLEANUP_PS_FILE" ]] || return 1
+    cat "$RUNNERCTL_CLEANUP_PS_FILE"
+  else
+    ps -eo pid=,args= 2>/dev/null
+  fi
+}
+
+collect_activity(){
+  local snapshot
+  ACTIVITY_PROBE_OK=true; RUNNER_JOB_ACTIVE=false; DOCKER_BUILD_ACTIVE=false
+  if ! snapshot="$(process_snapshot)"; then ACTIVITY_PROBE_OK=false; return; fi
+  if printf '%s\n' "$snapshot" | grep -E '[R]unner\.Worker([[:space:]]|$)' >/dev/null 2>&1; then RUNNER_JOB_ACTIVE=true; fi
+  if printf '%s\n' "$snapshot" | grep -E '(^|[[:space:]/])docker([[:space:]].*)?[[:space:]]build(x[[:space:]]+build)?([[:space:]]|$)|(^|[[:space:]/])buildctl([[:space:]]|$)' >/dev/null 2>&1; then DOCKER_BUILD_ACTIVE=true; fi
+}
+
+size_to_bytes(){
+  local raw="${1//[[:space:]]/}" num unit mult
+  if [[ "$raw" =~ ^([0-9]+([.][0-9]+)?)(B|kB|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$ ]]; then
+    num="${BASH_REMATCH[1]}"; unit="${BASH_REMATCH[3]}"
+  else
+    return 1
+  fi
+  case "$unit" in
+    B) mult=1 ;; kB|KB) mult=1000 ;; MB) mult=1000000 ;; GB) mult=1000000000 ;; TB) mult=1000000000000 ;;
+    KiB) mult=1024 ;; MiB) mult=1048576 ;; GiB) mult=1073741824 ;; TiB) mult=1099511627776 ;;
+    *) return 1 ;;
+  esac
+  awk -v n="$num" -v m="$mult" 'BEGIN {printf "%.0f", n*m}'
+}
+
+collect_docker(){
+  local rows line type size parsed ids containers
+  DOCKER_CLI=false; DOCKER_DAEMON=false; DOCKER_ACCOUNTING_OK=true; DOCKER_ROOT=""; DOCKER_IMAGE_COUNT=0; DOCKER_BUILD_CACHE_BYTES=0; DOCKER_RUNNING_CONTAINERS=0; DOCKER_ERROR=""
+  command -v docker >/dev/null 2>&1 || { DOCKER_ACCOUNTING_OK=false; DOCKER_ERROR="docker CLI not installed"; return; }
+  DOCKER_CLI=true
+  if ! DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" || [[ -z "$DOCKER_ROOT" ]]; then
+    DOCKER_ACCOUNTING_OK=false; DOCKER_ERROR="Docker daemon unavailable"; return
+  fi
+  DOCKER_DAEMON=true
+  if ! containers="$(docker ps -q 2>/dev/null)"; then DOCKER_ACCOUNTING_OK=false; DOCKER_ERROR="cannot inspect running containers"; return; fi
+  if [[ -n "$containers" ]]; then DOCKER_RUNNING_CONTAINERS="$(printf '%s\n' "$containers" | awk 'NF{n++} END{print n+0}')"; fi
+  if ! ids="$(docker image ls -aq 2>/dev/null)"; then DOCKER_ACCOUNTING_OK=false; DOCKER_ERROR="cannot inspect Docker images"; return; fi
+  if [[ -n "$ids" ]]; then DOCKER_IMAGE_COUNT="$(printf '%s\n' "$ids" | awk 'NF && !seen[$0]++{n++} END{print n+0}')"; fi
+  if ! rows="$(docker system df --format '{{.Type}}\t{{.Size}}' 2>/dev/null)"; then DOCKER_ACCOUNTING_OK=false; DOCKER_ERROR="cannot inspect Docker disk usage"; return; fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    type="${line%%$'\t'*}"; [[ "$line" == *$'\t'* ]] || { DOCKER_ACCOUNTING_OK=false; DOCKER_ERROR="malformed Docker disk usage output"; return; }
+    size="${line#*$'\t'}"
+    parsed="$(size_to_bytes "$size" 2>/dev/null || true)"
+    [[ "$parsed" =~ ^[0-9]+$ ]] || { DOCKER_ACCOUNTING_OK=false; DOCKER_ERROR="malformed Docker size value"; return; }
+    [[ "$type" == "Build Cache" ]] && DOCKER_BUILD_CACHE_BYTES="$parsed"
+  done <<<"$rows"
+}
+
+warnings_reset(){ HOST_WARNINGS=""; }
+warning_add(){ local msg="$1"; [[ -z "$HOST_WARNINGS" ]] && HOST_WARNINGS="$msg" || HOST_WARNINGS="$HOST_WARNINGS"$'\n'"$msg"; }
+
+warnings_json(){
+  local first=true msg
+  printf '['
+  if [[ -n "$HOST_WARNINGS" ]]; then
+    while IFS= read -r msg; do
+      [[ -n "$msg" ]] || continue
+      [[ "$first" == true ]] || printf ','; first=false; json_quote "$msg"
+    done <<<"$HOST_WARNINGS"
+  fi
+  printf ']'
+}
+
+collect_host_status(){
+  local root_path home_path min_kb
+  policy_load; warnings_reset; collect_activity; collect_docker
+  root_path="${RUNNERCTL_CLEANUP_ROOT_PATH:-/}"; home_path="$RUNNERCTL_HOME"
+  ROOT_TOTAL_KB=0; ROOT_AVAIL_KB=0; ROOT_USED_PCT=0
+  HOME_TOTAL_KB=0; HOME_AVAIL_KB=0; HOME_USED_PCT=0
+  DOCKER_TOTAL_KB=0; DOCKER_AVAIL_KB=0; DOCKER_USED_PCT=0
+  read -r ROOT_TOTAL_KB ROOT_AVAIL_KB ROOT_USED_PCT <<<"$(df_stats "$root_path" 2>/dev/null || true)"
+  read -r HOME_TOTAL_KB HOME_AVAIL_KB HOME_USED_PCT <<<"$(df_stats "$home_path" 2>/dev/null || true)"
+  ROOT_TOTAL_KB="${ROOT_TOTAL_KB:-0}"; ROOT_AVAIL_KB="${ROOT_AVAIL_KB:-0}"; ROOT_USED_PCT="${ROOT_USED_PCT:-0}"
+  HOME_TOTAL_KB="${HOME_TOTAL_KB:-0}"; HOME_AVAIL_KB="${HOME_AVAIL_KB:-0}"; HOME_USED_PCT="${HOME_USED_PCT:-0}"
+  if [[ "$DOCKER_DAEMON" == true ]]; then
+    read -r DOCKER_TOTAL_KB DOCKER_AVAIL_KB DOCKER_USED_PCT <<<"$(df_stats "$DOCKER_ROOT" 2>/dev/null || true)"
+    DOCKER_TOTAL_KB="${DOCKER_TOTAL_KB:-0}"; DOCKER_AVAIL_KB="${DOCKER_AVAIL_KB:-0}"; DOCKER_USED_PCT="${DOCKER_USED_PCT:-0}"
+  fi
+  WORKSPACES_KB="$(workspace_total_kb)"
+  [[ "$POLICY_VALID" == true ]] || warning_add "Host cleanup policy is malformed: $POLICY_ERROR"
+  [[ "$ACTIVITY_PROBE_OK" == true ]] || warning_add "Runner/build activity could not be inspected safely."
+  [[ "$DOCKER_CLI" == true ]] || warning_add "Docker CLI is not installed."
+  [[ "$DOCKER_CLI" != true || "$DOCKER_DAEMON" == true ]] || warning_add "Docker daemon is not reachable."
+  [[ "$DOCKER_DAEMON" != true || "$DOCKER_ACCOUNTING_OK" == true ]] || warning_add "Docker disk accounting is unavailable: $DOCKER_ERROR"
+  (( ROOT_USED_PCT < 85 )) || warning_add "Root filesystem is ${ROOT_USED_PCT}% used."
+  (( HOME_USED_PCT < 85 )) || warning_add "RUNNERCTL_HOME filesystem is ${HOME_USED_PCT}% used."
+  if [[ "$DOCKER_DAEMON" == true && "$DOCKER_USED_PCT" =~ ^[0-9]+$ ]] && (( DOCKER_USED_PCT >= 85 )); then warning_add "Docker root filesystem is ${DOCKER_USED_PCT}% used."; fi
+  min_kb=$((POLICY_MIN_FREE_GB * 1024 * 1024))
+  CLEANUP_NEEDED=false
+  if [[ "$DOCKER_DAEMON" == true && "$DOCKER_AVAIL_KB" =~ ^[0-9]+$ ]] && (( DOCKER_AVAIL_KB > 0 && DOCKER_AVAIL_KB < min_kb )); then CLEANUP_NEEDED=true; warning_add "Docker root free space is below the ${POLICY_MIN_FREE_GB} GiB policy target."; fi
+  HOST_BLOCKED=false; HOST_BLOCK_REASON=""
+  if [[ "$ACTIVITY_PROBE_OK" != true ]]; then HOST_BLOCKED=true; HOST_BLOCK_REASON="activity_probe_failed"
+  elif [[ "$RUNNER_JOB_ACTIVE" == true ]]; then HOST_BLOCKED=true; HOST_BLOCK_REASON="runner_job_active"
+  elif [[ "$DOCKER_BUILD_ACTIVE" == true ]]; then HOST_BLOCKED=true; HOST_BLOCK_REASON="docker_build_active"
+  elif (( DOCKER_RUNNING_CONTAINERS > 0 )); then HOST_BLOCKED=true; HOST_BLOCK_REASON="running_containers"
+  elif [[ "$DOCKER_DAEMON" == true && "$DOCKER_ACCOUNTING_OK" != true ]]; then HOST_BLOCKED=true; HOST_BLOCK_REASON="docker_accounting_failed"
+  fi
+}
+
+print_host_status_json(){
+  printf '{"policy":{"enabled":%s,"min_free_gb":%s,"image_retention_hours":%s,"build_cache_retention_hours":%s,"valid":%s,"error":' "$POLICY_ENABLED" "$POLICY_MIN_FREE_GB" "$POLICY_IMAGE_HOURS" "$POLICY_CACHE_HOURS" "$POLICY_VALID"; json_quote "$POLICY_ERROR"; printf '}'
+  printf ',"platform":{"os":'; json_quote "$(uname -s)"; printf '}'
+  printf ',"activity":{"probe_ok":%s,"runner_job_active":%s,"docker_build_active":%s,"running_containers":%s}' "$ACTIVITY_PROBE_OK" "$RUNNER_JOB_ACTIVE" "$DOCKER_BUILD_ACTIVE" "$DOCKER_RUNNING_CONTAINERS"
+  printf ',"docker":{"cli":%s,"daemon":%s,"accounting_ok":%s,"root_dir":' "$DOCKER_CLI" "$DOCKER_DAEMON" "$DOCKER_ACCOUNTING_OK"; json_quote "$DOCKER_ROOT"; printf ',"image_count":%s,"build_cache_bytes":%s,"error":' "$DOCKER_IMAGE_COUNT" "$DOCKER_BUILD_CACHE_BYTES"; json_quote "$DOCKER_ERROR"; printf '}'
+  printf ',"storage":{"root":{"total_kb":%s,"available_kb":%s,"used_percent":%s},"runnerctl_home":{"total_kb":%s,"available_kb":%s,"used_percent":%s},"docker_root":{"total_kb":%s,"available_kb":%s,"used_percent":%s},"runner_workspaces_kb":%s}' "$ROOT_TOTAL_KB" "$ROOT_AVAIL_KB" "$ROOT_USED_PCT" "$HOME_TOTAL_KB" "$HOME_AVAIL_KB" "$HOME_USED_PCT" "$DOCKER_TOTAL_KB" "$DOCKER_AVAIL_KB" "$DOCKER_USED_PCT" "$WORKSPACES_KB"
+  printf ',"decision":{"cleanup_needed":%s,"blocked":%s,"reason":' "$CLEANUP_NEEDED" "$HOST_BLOCKED"; json_quote "$HOST_BLOCK_REASON"; printf '}'
+  printf ',"warnings":'; warnings_json; printf '}\n'
+}
+
+print_host_status_text(){
+  printf 'Host disk hygiene\n'
+  printf '  policy enabled:             %s\n' "$POLICY_ENABLED"
+  printf '  minimum free space:         %s GiB\n' "$POLICY_MIN_FREE_GB"
+  printf '  image retention:            %s hours\n' "$POLICY_IMAGE_HOURS"
+  printf '  build-cache retention:      %s hours\n' "$POLICY_CACHE_HOURS"
+  if (( ROOT_TOTAL_KB > 0 )); then printf '  root filesystem:            %s MiB free / %s MiB (%s%% used)\n' "$((ROOT_AVAIL_KB/1024))" "$((ROOT_TOTAL_KB/1024))" "$ROOT_USED_PCT"; else printf '  root filesystem:            unknown\n'; fi
+  if (( HOME_TOTAL_KB > 0 )); then printf '  RUNNERCTL_HOME filesystem:  %s MiB free / %s MiB (%s%% used)\n' "$((HOME_AVAIL_KB/1024))" "$((HOME_TOTAL_KB/1024))" "$HOME_USED_PCT"; else printf '  RUNNERCTL_HOME filesystem:  unknown\n'; fi
+  printf '  runner workspaces:          %s MiB\n' "$((WORKSPACES_KB/1024))"
+  printf '  Docker CLI:                 %s\n' "$DOCKER_CLI"
+  printf '  Docker daemon:              %s\n' "$DOCKER_DAEMON"
+  if [[ "$DOCKER_DAEMON" == true ]]; then
+    printf '  Docker root:                %s\n' "$DOCKER_ROOT"
+    if (( DOCKER_TOTAL_KB > 0 )); then printf '  Docker filesystem:          %s MiB free / %s MiB (%s%% used)\n' "$((DOCKER_AVAIL_KB/1024))" "$((DOCKER_TOTAL_KB/1024))" "$DOCKER_USED_PCT"; else printf '  Docker filesystem:          unknown\n'; fi
+    printf '  Docker images:              %s\n' "$DOCKER_IMAGE_COUNT"
+    printf '  Docker build cache:         %s MiB\n' "$((DOCKER_BUILD_CACHE_BYTES/1024/1024))"
+  fi
+  printf '  runner job active:          %s\n' "$RUNNER_JOB_ACTIVE"
+  printf '  Docker build active:        %s\n' "$DOCKER_BUILD_ACTIVE"
+  printf '  running containers:         %s\n' "$DOCKER_RUNNING_CONTAINERS"
+  printf '  cleanup needed:             %s\n' "$CLEANUP_NEEDED"
+  printf '  cleanup blocked:            %s\n' "$HOST_BLOCKED"
+  [[ -z "$HOST_BLOCK_REASON" ]] || printf '  block reason:               %s\n' "$HOST_BLOCK_REASON"
+  if [[ -n "$HOST_WARNINGS" ]]; then local msg; while IFS= read -r msg; do [[ -n "$msg" ]] && printf '  WARNING: %s\n' "$msg"; done <<<"$HOST_WARNINGS"; fi
+}
+
+host_status(){ local json=0; [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die_code 2 "cleanup host status accepts only --json"; collect_host_status; [[ "$json" -eq 1 ]] && print_host_status_json || print_host_status_text; }
+
+acquire_host_lock(){
+  local pid=""
+  ensure_cleanup_dir
+  if mkdir "$HOST_LOCK_DIR" 2>/dev/null; then printf '%s\n' "$$" >"$HOST_LOCK_DIR/pid"; return 0; fi
+  [[ -f "$HOST_LOCK_DIR/pid" ]] && pid="$(cat "$HOST_LOCK_DIR/pid" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then
+    rm -f -- "$HOST_LOCK_DIR/pid" 2>/dev/null || true
+    if rmdir "$HOST_LOCK_DIR" 2>/dev/null && mkdir "$HOST_LOCK_DIR" 2>/dev/null; then printf '%s\n' "$$" >"$HOST_LOCK_DIR/pid"; return 0; fi
+  fi
+  return 1
+}
+release_host_lock(){ rm -f -- "$HOST_LOCK_DIR/pid" 2>/dev/null || true; rmdir "$HOST_LOCK_DIR" 2>/dev/null || true; }
+
+host_run_result(){
+  local json="$1" result="$2" reason="$3" before="$4" after="$5" reclaimed=0
+  [[ "$before" =~ ^[0-9]+$ && "$after" =~ ^[0-9]+$ && "$after" -gt "$before" ]] && reclaimed=$((after-before))
+  if [[ "$json" -eq 1 ]]; then
+    printf '{"result":'; json_quote "$result"; printf ',"reason":'; json_quote "$reason"; printf ',"policy_enabled":%s,"cleanup_needed":%s,"blocked":%s,"before_available_kb":%s,"after_available_kb":%s,"reclaimed_kb":%s,"image_filter":' "$POLICY_ENABLED" "$CLEANUP_NEEDED" "$HOST_BLOCKED" "${before:-0}" "${after:-0}" "$reclaimed"; json_quote "until=${POLICY_IMAGE_HOURS}h"; printf ',"build_cache_filter":'; json_quote "until=${POLICY_CACHE_HOURS}h"; printf ',"volumes_pruned":false}\n'
+  else
+    printf 'Host cleanup: %s (%s)\n' "$result" "$reason"
+    printf '  free before: %s MiB\n' "$(( ${before:-0} / 1024 ))"
+    printf '  free after:  %s MiB\n' "$(( ${after:-0} / 1024 ))"
+    printf '  image filter: until=%sh\n' "$POLICY_IMAGE_HOURS"
+    printf '  build cache filter: until=%sh\n' "$POLICY_CACHE_HOURS"
+    printf '  volumes pruned: false\n'
+  fi
+}
+
+host_run(){
+  local dry=0 json=0 before after min_kb rc=0
+  while [[ $# -gt 0 ]]; do case "$1" in --dry-run) dry=1 ;; --json) json=1 ;; *) die_code 2 "Unknown cleanup host run option: $1" ;; esac; shift; done
+  if ! acquire_host_lock; then host_run_result "$json" deferred lock_busy 0 0; return 6; fi
+  trap release_host_lock EXIT INT TERM
+  collect_host_status
+  before="$DOCKER_AVAIL_KB"; after="$before"; min_kb=$((POLICY_MIN_FREE_GB * 1024 * 1024))
+  if [[ "$POLICY_VALID" != true ]]; then host_run_result "$json" refused malformed_policy "$before" "$after"; rc=2
+  elif [[ "$DOCKER_CLI" != true || "$DOCKER_DAEMON" != true ]]; then host_run_result "$json" failed docker_unavailable "$before" "$after"; rc=5
+  elif [[ "$DOCKER_ACCOUNTING_OK" != true ]]; then host_run_result "$json" failed docker_accounting_failed "$before" "$after"; rc=7
+  elif [[ "$ACTIVITY_PROBE_OK" != true ]]; then host_run_result "$json" failed activity_probe_failed "$before" "$after"; rc=7
+  elif [[ "$HOST_BLOCKED" == true ]]; then host_run_result "$json" deferred "$HOST_BLOCK_REASON" "$before" "$after"; rc=4
+  elif [[ "$CLEANUP_NEEDED" != true ]]; then host_run_result "$json" skipped free_space_target_met "$before" "$after"; rc=0
+  elif [[ "$dry" -eq 1 ]]; then host_run_result "$json" dry-run would_prune_age_filtered_images_and_cache "$before" "$after"; rc=0
+  elif [[ "$POLICY_ENABLED" != true ]]; then host_run_result "$json" refused policy_disabled "$before" "$after"; rc=2
+  else
+    if ! docker image prune -a --force --filter "until=${POLICY_IMAGE_HOURS}h" >/dev/null; then host_run_result "$json" failed docker_image_prune_failed "$before" "$after"; rc=5
+    elif ! docker builder prune --force --filter "until=${POLICY_CACHE_HOURS}h" >/dev/null; then host_run_result "$json" failed docker_builder_prune_failed "$before" "$after"; rc=5
+    else
+      collect_host_status
+      after="$DOCKER_AVAIL_KB"
+      if [[ "$after" =~ ^[0-9]+$ ]] && (( after >= min_kb )); then host_run_result "$json" cleaned free_space_target_met "$before" "$after"; rc=0
+      else host_run_result "$json" cleaned target_still_unmet "$before" "$after"; rc=3
+      fi
+    fi
+  fi
+  release_host_lock; trap - EXIT INT TERM
+  return "$rc"
+}
+
+host_main(){
+  local sub="${1:-status}" json=0
+  shift || true
+  case "$sub" in
+    status) host_status "$@" ;;
+    policy) [[ "${1:-}" == --json ]] && { json=1; shift; }; [[ $# -eq 0 ]] || die_code 2 "cleanup host policy accepts only --json"; print_policy "$json" ;;
+    configure) host_configure "$@" ;;
+    run) host_run "$@" ;;
+    help|--help|-h) usage ;;
+    *) die_code 2 "Unknown cleanup host command: $sub" ;;
+  esac
 }
 
 main(){
@@ -157,6 +572,7 @@ main(){
   shift || true
   case "$cmd" in
     help|--help|-h) usage ;;
+    host) host_main "$@" ;;
     enable) [[ $# -eq 1 ]] || die "cleanup enable requires RUNNER"; enable_one "$1" ;;
     enable-all)
       [[ $# -eq 0 ]] || die "cleanup enable-all takes no arguments"
@@ -177,6 +593,7 @@ main(){
       done
       [[ -n "$name" ]] && status_one "$name" "$json" || status_all "$json"
       ;;
+    _hook-workspace) [[ $# -eq 1 ]] || exit 0; hook_workspace "$1" ;;
     *) die "Unknown cleanup command: $cmd" ;;
   esac
 }
