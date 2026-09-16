@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-09-16
+
+### Fixed
+- Legacy queue stale-grace settings are persisted in host queue state instead of being captured only when hooks are generated.
+- Generated queue hooks read the persisted stale-grace value at runtime, preventing long-running jobs from being reclaimed after the default 30-second window.
+- Queue status now reports the effective `stale_grace_seconds` value for diagnosis.
+
+### Reliability
+- Added regression coverage for persisted stale-grace settings and regenerated legacy queue hooks.
+- Existing installations can re-run `runnerctl queue enable` with `RUNNERCTL_QUEUE_STALE_GRACE_SECONDS` after upgrading to regenerate hooks safely.
+
 ## [0.7.2] - 2026-08-29
 
 ### Fixed
@@ -239,7 +250,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The project began with the initial `runnerctl` implementation for managing multiple GitHub Actions self-hosted runners on one host, including runner registration, service lifecycle management, logs, removal, environment diagnostics, installation tooling, CI, and local isolation guidance.
 
-[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.3
 [0.7.2]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.2
 [0.7.1]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.1
 [0.7.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.0

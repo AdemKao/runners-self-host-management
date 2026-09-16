@@ -11,7 +11,7 @@ WAITING_DIR="$QUEUE_DIR/waiting"
 LOCK_DIR="$QUEUE_DIR/.lock"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POLL_SECONDS="${RUNNERCTL_QUEUE_POLL_SECONDS:-1}"
-STALE_GRACE_SECONDS="${RUNNERCTL_QUEUE_STALE_GRACE_SECONDS:-30}"
+DEFAULT_STALE_GRACE_SECONDS=30
 
 info(){ printf '[runnerctl-queue] %s\n' "$*"; }
 warn(){ printf '[runnerctl-queue] WARN: %s\n' "$*" >&2; }
@@ -62,11 +62,17 @@ config_value(){ awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$CONFIG
 queue_enabled(){ [[ "$(config_value enabled)" == true ]]; }
 queue_drained(){ [[ "$(config_value drained)" == true ]]; }
 max_concurrency(){ local n; n="$(config_value max_concurrency)"; [[ "$n" =~ ^[1-9][0-9]*$ ]] && printf '%s' "$n" || printf '1'; }
+stale_grace_seconds(){
+  local value="${RUNNERCTL_QUEUE_STALE_GRACE_SECONDS:-}"
+  [[ "$value" =~ ^[0-9]+$ ]] || value="$(config_value stale_grace_seconds)"
+  [[ "$value" =~ ^[0-9]+$ ]] || value="$DEFAULT_STALE_GRACE_SECONDS"
+  printf '%s' "$value"
+}
 
 write_config(){
-  local enabled="$1" max="$2" drained="$3" tmp
+  local enabled="$1" max="$2" drained="$3" stale="${4:-$(stale_grace_seconds)}" tmp
   ensure_dirs; tmp="$(mktemp)"
-  printf 'enabled=%s\nmax_concurrency=%s\ndrained=%s\n' "$enabled" "$max" "$drained" >"$tmp"
+  printf 'enabled=%s\nmax_concurrency=%s\ndrained=%s\nstale_grace_seconds=%s\n' "$enabled" "$max" "$drained" "$stale" >"$tmp"
   mv "$tmp" "$CONFIG_FILE"
 }
 
@@ -163,13 +169,13 @@ slot_file(){ printf '%s/%s.slot' "$SLOTS_DIR" "$1"; }
 slot_value(){ awk -F= -v k="$2" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$1" 2>/dev/null || true; }
 
 cleanup_stale_state(){
-  local f pid acquired now age
-  ensure_dirs; now="$(date +%s)"
+  local f pid acquired now age stale_grace
+  ensure_dirs; now="$(date +%s)"; stale_grace="$(stale_grace_seconds)"
   for f in "$SLOTS_DIR"/*.slot; do
     [[ -f "$f" ]] || continue
     pid="$(slot_value "$f" worker_pid)"; acquired="$(slot_value "$f" acquired_at)"
     [[ "$acquired" =~ ^[0-9]+$ ]] || acquired=0; age=$((now - acquired))
-    if [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null && (( age >= STALE_GRACE_SECONDS )); then
+    if [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null && (( age >= stale_grace )); then
       warn "recovering stale slot: $(basename "$f")"
       rm -f "$f"
     fi
@@ -198,12 +204,17 @@ waiting="\$queue_dir/waiting"
 lock="\$queue_dir/.lock"
 runner="$runner"
 poll="${POLL_SECONDS}"
-stale_grace="${STALE_GRACE_SECONDS}"
 mkdir -p "\$slots" "\$waiting"
 wait_file="\$waiting/\$runner-\$\$.wait"
 printf 'runner=%s\\nhook_pid=%s\\nwaiting_at=%s\\n' "\$runner" "\$\$" "\$(date +%s)" >"\$wait_file"
 trap 'rm -f "\$wait_file"' EXIT INT TERM
 value(){ awk -F= -v k="\$1" '\$1==k{sub(/^[^=]*=/,"");print;exit}' "\$config" 2>/dev/null || true; }
+stale_grace_seconds(){
+  local configured="\${RUNNERCTL_QUEUE_STALE_GRACE_SECONDS:-}"
+  [[ "\$configured" =~ ^[0-9]+$ ]] || configured="\$(value stale_grace_seconds)"
+  [[ "\$configured" =~ ^[0-9]+$ ]] || configured=30
+  printf '%s' "\$configured"
+}
 slot_value(){ awk -F= -v k="\$2" '\$1==k{sub(/^[^=]*=/,"");print;exit}' "\$1" 2>/dev/null || true; }
 lock_acquire(){
   while ! mkdir "\$lock" 2>/dev/null; do
@@ -215,7 +226,8 @@ lock_acquire(){
 }
 lock_release(){ rm -rf "\$lock" 2>/dev/null || true; }
 cleanup_stale(){
-  now="\$(date +%s)"
+  local now="\$(date +%s)" stale_grace
+  stale_grace="\$(stale_grace_seconds)"
   for f in "\$slots"/*.slot; do
     [[ -f "\$f" ]] || continue
     p="\$(slot_value "\$f" worker_pid)"; acquired="\$(slot_value "\$f" acquired_at)"; [[ "\$acquired" =~ ^[0-9]+$ ]] || acquired=0
@@ -355,12 +367,13 @@ cmd_resume(){
 }
 
 print_status(){
-  local json="$1" enabled=false drained=false max active waiting configured
+  local json="$1" enabled=false drained=false max stale active waiting configured
   ensure_dirs; acquire_lock; cleanup_stale_state; release_lock
   queue_enabled && enabled=true; queue_drained && drained=true; max="$(max_concurrency)"
+  stale="$(stale_grace_seconds)"
   active="$(active_count)"; waiting="$(waiting_count)"; configured="$(configured_runner_count)"
   if [[ "$json" -eq 1 ]]; then
-    printf '{"enabled":%s,"drained":%s,"max_concurrency":%s,"active":%s,"waiting":%s,"configured_runners":%s,"slots":[' "$enabled" "$drained" "$max" "$active" "$waiting" "$configured"
+    printf '{"enabled":%s,"drained":%s,"max_concurrency":%s,"stale_grace_seconds":%s,"active":%s,"waiting":%s,"configured_runners":%s,"slots":[' "$enabled" "$drained" "$max" "$stale" "$active" "$waiting" "$configured"
     local first=true f runner pid acquired
     for f in "$SLOTS_DIR"/*.slot; do
       [[ -f "$f" ]] || continue
@@ -374,6 +387,7 @@ print_status(){
     printf '  enabled:            %s\n' "$enabled"
     printf '  drained:            %s\n' "$drained"
     printf '  max concurrency:    %s\n' "$max"
+    printf '  stale grace seconds:%s\n' " $stale"
     printf '  active:             %s\n' "$active"
     printf '  waiting:            %s\n' "$waiting"
     printf '  configured runners: %s\n' "$configured"
