@@ -38,6 +38,19 @@ If a wait exceeds the limit, runnerctl exits the started hook with an explicit e
 
 TERM, INT, and HUP also terminate the hidden queue child and clean that runner's local waiting/slot files. Cancelling an Actions job should therefore no longer leave the wait loop running indefinitely.
 
+## Persisted stale-slot grace
+
+The legacy queue defaults to a 30-second stale-slot grace period. Configure a longer value for jobs that can legitimately outlive a short worker or listener interruption:
+
+```bash
+export RUNNERCTL_QUEUE_STALE_GRACE_SECONDS=86400
+runnerctl queue enable --max-concurrency 1
+```
+
+The value is persisted in the host queue configuration, and generated started hooks read it at runtime. This keeps an active long-running job from being reclaimed just because its worker process was briefly unavailable. `runnerctl queue status --json` reports the effective `stale_grace_seconds` value.
+
+After upgrading an existing v0.7.2 installation, drain the queue, wait for active jobs to finish, and run `queue enable` once to regenerate the hooks with the new behavior. `queue enable` resumes the gate; verify the status after it returns.
+
 ## Inspect capacity
 
 ```bash

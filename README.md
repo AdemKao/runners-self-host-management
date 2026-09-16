@@ -196,6 +196,15 @@ runnerctl bot
 
 Scheduler details: [docs/scheduler.md](docs/scheduler.md)
 
+The compatibility `runnerctl queue` gate persists its stale-slot grace period. For long-running jobs, configure it before enabling or re-enabling the gate:
+
+```bash
+export RUNNERCTL_QUEUE_STALE_GRACE_SECONDS=86400
+runnerctl queue enable --max-concurrency 1
+```
+
+Prefer `runnerctl scheduler` for new production setups because waiting jobs remain in GitHub's native `queued` state.
+
 Notification/provider setup: [docs/notifications.md](docs/notifications.md)
 
 Read-only Bot/API setup and security: [docs/bot-controller.md](docs/bot-controller.md)

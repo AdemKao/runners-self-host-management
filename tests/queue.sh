@@ -7,7 +7,7 @@ trap 'jobs -p | xargs kill 2>/dev/null || true; rm -rf "$tmp"' EXIT
 export RUNNERCTL_HOME="$tmp/data"
 export RUNNERCTL_SKIP_SERVICE_RESTART=1
 export RUNNERCTL_QUEUE_POLL_SECONDS=0.05
-export RUNNERCTL_QUEUE_STALE_GRACE_SECONDS=0
+export RUNNERCTL_QUEUE_STALE_GRACE_SECONDS=86400
 export RUNNERCTL_QUEUE_MAX_WAIT_SECONDS=2
 mkdir -p "$RUNNERCTL_HOME/runners/repo-a-01" "$RUNNERCTL_HOME/runners/repo-b-01"
 printf 'name=repo-a-01\nrepo=example/repo-a\n' > "$RUNNERCTL_HOME/runners/repo-a-01/.runnerctl-meta"
@@ -34,15 +34,22 @@ status="$(queue status --json)"
 printf '%s' "$status" | node -e '
 const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8"));
 if(!x.enabled || x.drained || x.max_concurrency!==1 || x.active!==0 || x.configured_runners!==2) process.exit(1);
-if(x.max_wait_seconds!==2 || x.mode!=="legacy-admission-gate") process.exit(1);
+if(x.max_wait_seconds!==2 || x.mode!=="legacy-admission-gate" || x.stale_grace_seconds!==86400) process.exit(1);
 '
 
 start_a="$RUNNERCTL_HOME/hooks/repo-a-01/queue-start.sh"
 end_a="$RUNNERCTL_HOME/hooks/repo-a-01/queue-completed.sh"
 start_b="$RUNNERCTL_HOME/hooks/repo-b-01/queue-start.sh"
 end_b="$RUNNERCTL_HOME/hooks/repo-b-01/queue-completed.sh"
+legacy_a="$RUNNERCTL_HOME/hooks/repo-a-01/queue-start.legacy.sh"
 [[ -x "$RUNNERCTL_HOME/hooks/repo-a-01/queue-start.legacy.sh" ]]
 [[ -x "$RUNNERCTL_HOME/hooks/repo-b-01/queue-start.legacy.sh" ]]
+grep -q '^stale_grace_seconds=86400$' "$RUNNERCTL_HOME/queue/config"
+grep -q 'stale_grace_seconds' "$legacy_a"
+! grep -q 'stale_grace="86400"' "$legacy_a"
+unset RUNNERCTL_QUEUE_STALE_GRACE_SECONDS
+queue set --max-concurrency 1 >/dev/null
+queue status --json | node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(0,"utf8"));if(x.stale_grace_seconds!==86400)process.exit(1)'
 
 "$start_a" >/dev/null
 [[ -f "$RUNNERCTL_HOME/queue/slots/repo-a-01.slot" ]]

@@ -138,6 +138,15 @@ runnerctl bot
 - Notification / provider：[docs/notifications.md](docs/notifications.md)
 - Read-only Bot/API：[docs/bot-controller.md](docs/bot-controller.md)
 
+相容用的 `runnerctl queue` 會持久化 stale slot grace。長時間 job 啟用或重新啟用 queue 前，先設定較長的值：
+
+```bash
+export RUNNERCTL_QUEUE_STALE_GRACE_SECONDS=86400
+runnerctl queue enable --max-concurrency 1
+```
+
+新的 production setup 建議使用 `runnerctl scheduler`，因為等待中的 job 會維持 GitHub 原生的 `queued` 狀態，不會先被分配後卡在 runner hook。
+
 ### Bot/API controller
 
 先檢查環境，輸出不會包含 token/secret：
