@@ -23,29 +23,29 @@ bash -n "$ROOT/tests/installer.sh"
 
 [[ "$(bash "$ROOT/runnerctl" version)" == "$VERSION" ]]
 [[ "$(bash "$ROOT/bin/runnerctl" version)" == "$VERSION" ]]
-bash "$ROOT/runnerctl" --help | grep -q 'Runner Management:'
-bash "$ROOT/runnerctl" --help | grep -q 'host'
-bash "$ROOT/runnerctl" --help | grep -q 'ci'
-bash "$ROOT/runnerctl" --help | grep -q 'capacity'
-bash "$ROOT/runnerctl" --help | grep -q 'queue'
-bash "$ROOT/runnerctl" --help | grep -q 'upgrade'
-bash "$ROOT/runnerctl" --help | grep -q 'AI AGENT:'
-bash "$ROOT/runnerctl" add --help | grep -q 'Side effects:'
-bash "$ROOT/runnerctl" host --help | grep -q 'host prerequisites'
-bash "$ROOT/runnerctl" ci --help | grep -q 'GitHub Actions workflows'
-bash "$ROOT/runnerctl" capacity --help | grep -q 'safe job concurrency'
-bash "$ROOT/runnerctl" queue --help | grep -q 'host-wide execution gate'
-bash "$ROOT/runnerctl" upgrade --help | grep -q 'runnerctl upgrade --check --json'
-bash "$ROOT/runnerctl" self-update --help | grep -q 'Check for or install the latest runnerctl release.'
-bash "$ROOT/runnerctl" help auth map | grep -q 'Map a repository'
-bash "$ROOT/runnerctl" agent | grep -q 'host inspect'
-bash "$ROOT/runnerctl" agent | grep -q 'ci check'
-bash "$ROOT/runnerctl" agent | grep -q 'capacity'
-bash "$ROOT/runnerctl" agent | grep -q 'queue status'
-bash "$ROOT/runnerctl" agent | grep -q 'upgrade --check'
-bash "$ROOT/runnerctl" completion bash | grep -q 'capacity queue upgrade'
-bash "$ROOT/runnerctl" completion zsh | grep -q 'queue:Manage host-wide job concurrency'
-bash "$ROOT/runnerctl" completion fish | grep -q 'capacity queue upgrade'
+bash "$ROOT/runnerctl" --help | grep -F 'Runner Management:' >/dev/null
+bash "$ROOT/runnerctl" --help | grep -F 'host' >/dev/null
+bash "$ROOT/runnerctl" --help | grep -F 'ci' >/dev/null
+bash "$ROOT/runnerctl" --help | grep -F 'capacity' >/dev/null
+bash "$ROOT/runnerctl" --help | grep -F 'queue' >/dev/null
+bash "$ROOT/runnerctl" --help | grep -F 'upgrade' >/dev/null
+bash "$ROOT/runnerctl" --help | grep -F 'AI AGENT:' >/dev/null
+bash "$ROOT/runnerctl" add --help | grep -F 'Side effects:' >/dev/null
+bash "$ROOT/runnerctl" host --help | grep -F 'host prerequisites' >/dev/null
+bash "$ROOT/runnerctl" ci --help | grep -F 'GitHub Actions workflows' >/dev/null
+bash "$ROOT/runnerctl" capacity --help | grep -F 'safe job concurrency' >/dev/null
+bash "$ROOT/runnerctl" queue --help | grep -F 'host-wide execution gate' >/dev/null
+bash "$ROOT/runnerctl" upgrade --help | grep -F 'runnerctl upgrade --check --json' >/dev/null
+bash "$ROOT/runnerctl" self-update --help | grep -F 'Check for or install the latest runnerctl release.' >/dev/null
+bash "$ROOT/runnerctl" help auth map | grep -F 'Map a repository' >/dev/null
+bash "$ROOT/runnerctl" agent | grep -F 'host inspect' >/dev/null
+bash "$ROOT/runnerctl" agent | grep -F 'ci check' >/dev/null
+bash "$ROOT/runnerctl" agent | grep -F 'capacity' >/dev/null
+bash "$ROOT/runnerctl" agent | grep -F 'queue status' >/dev/null
+bash "$ROOT/runnerctl" agent | grep -F 'upgrade --check' >/dev/null
+bash "$ROOT/runnerctl" completion bash | grep -F 'capacity queue upgrade' >/dev/null
+bash "$ROOT/runnerctl" completion zsh | grep -F 'queue:Manage host-wide job concurrency' >/dev/null
+bash "$ROOT/runnerctl" completion fish | grep -F 'capacity queue upgrade' >/dev/null
 bash "$ROOT/tests/launchd-status.sh"
 
 grep -Fq '(bin/"runnerctl").write_env_script' "$ROOT/Formula/runnerctl.rb"
@@ -155,11 +155,11 @@ PREFIX="$tmp/local" bash "$ROOT/install.sh" >/dev/null
 [[ -x "$tmp/local/libexec/runnerctl/bin/runnerctl-hooks" ]]
 [[ -x "$tmp/local/libexec/runnerctl/bin/runnerctl-queue" ]]
 [[ "$($tmp/local/bin/runnerctl version)" == "$VERSION" ]]
-$tmp/local/bin/runnerctl agent --json | grep -q '"agent_ready": true'
-$tmp/local/bin/runnerctl host --help | grep -q 'host prerequisites'
-$tmp/local/bin/runnerctl ci --help | grep -q 'GitHub Actions workflows'
-$tmp/local/bin/runnerctl capacity --help | grep -q 'safe job concurrency'
-$tmp/local/bin/runnerctl queue --help | grep -q 'host-wide execution gate'
+$tmp/local/bin/runnerctl agent --json | grep -F '"agent_ready": true' >/dev/null
+$tmp/local/bin/runnerctl host --help | grep -F 'host prerequisites' >/dev/null
+$tmp/local/bin/runnerctl ci --help | grep -F 'GitHub Actions workflows' >/dev/null
+$tmp/local/bin/runnerctl capacity --help | grep -F 'safe job concurrency' >/dev/null
+$tmp/local/bin/runnerctl queue --help | grep -F 'host-wide execution gate' >/dev/null
 RUNNERCTL_HOME="$tmp/installed-data" "$tmp/local/bin/runnerctl" capacity --json | node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.recommended) process.exit(1)'
 RUNNERCTL_HOME="$tmp/installed-data" "$tmp/local/bin/runnerctl" queue status --json | node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.enabled!==false) process.exit(1)'
 

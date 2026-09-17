@@ -5,13 +5,13 @@ tmp="$ROOT/tests/.smoke-v073.$$"
 cleanup(){ rm -f "$tmp" "$tmp.help" "$tmp.scheduler" "$tmp.queue" "$tmp.notify" "$tmp.bot"; }
 trap cleanup EXIT
 sed \
-  -e 's/VERSION="0\.4\.3"/VERSION="0.7.3"/' \
-  -e 's/NEXT_VERSION="0\.4\.4"/NEXT_VERSION="0.7.4"/' \
+  -e 's/VERSION="0\.4\.3"/VERSION="0.7.4"/' \
+  -e 's/NEXT_VERSION="0\.4\.4"/NEXT_VERSION="0.7.5"/' \
   -e "s/'host-wide execution gate'/'Legacy host-side admission gate'/g" \
   -e 's/capacity queue upgrade/capacity queue bot notify scheduler upgrade/g' \
   "$ROOT/tests/smoke-legacy.sh" >"$tmp"
 bash "$tmp"
-[[ "$(bash "$ROOT/runnerctl" version)" == "0.7.3" ]]
+[[ "$(bash "$ROOT/runnerctl" version)" == "0.7.4" ]]
 bash "$ROOT/runnerctl" --help >"$tmp.help"
 grep -q 'GitHub-native scheduling' "$tmp.help"
 grep -q 'Notifications and integrations' "$tmp.help"
@@ -30,8 +30,8 @@ if command -v python3 >/dev/null 2>&1; then
   grep -q 'Read-only Telegram, LINE, and HTTP API controller' "$tmp.bot"
   bash "$ROOT/runnerctl" bot doctor --json | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["version"]=="0.7.0" and x["read_only"] is True'
 fi
-bash "$ROOT/runnerctl" agent --json | grep -q '"scheduler status"'
-bash "$ROOT/runnerctl" agent --json | grep -q '"notify status"'
-bash "$ROOT/runnerctl" agent --json | grep -q '"bot query"'
-bash "$ROOT/runnerctl" completion bash | grep -q 'bot'
-echo "v0.7.3 smoke wrapper passed"
+bash "$ROOT/runnerctl" agent --json | grep -F '"scheduler status"' >/dev/null
+bash "$ROOT/runnerctl" agent --json | grep -F '"notify status"' >/dev/null
+bash "$ROOT/runnerctl" agent --json | grep -F '"bot query"' >/dev/null
+bash "$ROOT/runnerctl" completion bash | grep -F 'bot' >/dev/null
+echo "v0.7.4 smoke wrapper passed"

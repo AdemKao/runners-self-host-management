@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-09-17
+
+### Fixed
+- Legacy queue watchdogs now preserve the actual GitHub `Runner.Worker` parent PID when recording an acquired slot, instead of recording a short-lived asynchronous hook PID.
+- Re-enabling the legacy queue regenerates existing watchdog wrappers so upgrades apply hook fixes without requiring runner re-registration.
+
+### Reliability
+- Added regression coverage that verifies active slots retain the long-lived worker parent PID and are not immediately eligible for stale cleanup.
+
 ## [0.7.3] - 2026-09-16
 
 ### Fixed
@@ -250,7 +259,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The project began with the initial `runnerctl` implementation for managing multiple GitHub Actions self-hosted runners on one host, including runner registration, service lifecycle management, logs, removal, environment diagnostics, installation tooling, CI, and local isolation guidance.
 
-[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.4
 [0.7.3]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.3
 [0.7.2]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.2
 [0.7.1]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.1
