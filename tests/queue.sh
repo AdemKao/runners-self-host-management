@@ -54,9 +54,10 @@ queue status --json | node -e 'const fs=require("fs");const x=JSON.parse(fs.read
 "$start_a" >/dev/null
 [[ -f "$RUNNERCTL_HOME/queue/slots/repo-a-01.slot" ]]
 slot_worker_pid="$(awk -F= '$1=="worker_pid" {print $2; exit}' "$RUNNERCTL_HOME/queue/slots/repo-a-01.slot")"
-[[ "$slot_worker_pid" == "$$" ]]
+[[ "$slot_worker_pid" =~ ^[1-9][0-9]*$ ]]
 kill -0 "$slot_worker_pid" 2>/dev/null
-grep -q 'worker_pid="\$PPID"' "$start_a"
+grep -q 'find_worker_pid' "$start_a"
+grep -q 'worker_pid="\$(find_worker_pid)"' "$start_a"
 grep -q 'RUNNERCTL_QUEUE_WORKER_PID="\$worker_pid"' "$start_a"
 
 # A cancelled GitHub job must terminate the hidden legacy wait and clean state.
@@ -128,6 +129,30 @@ grep -q 'legacy admission wait exceeded 2s' "$tmp/maxwait.err"
 ! find "$RUNNERCTL_HOME/queue/waiting" -type f -name 'repo-a-01-*.wait' -print -quit | grep -q .
 [[ ! -f "$RUNNERCTL_HOME/queue/slots/repo-a-01.slot" ]]
 queue resume >/dev/null
+
+# The watchdog follows hook-dispatch parents to the real Runner.Worker.
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/ps" <<'EOF_PS'
+#!/usr/bin/env bash
+set -euo pipefail
+pid="${!#}"
+if [[ "$*" == *'args='* ]]; then
+  if [[ "$pid" == "${RUNNERCTL_TEST_DIRECT_PID:?}" ]]; then
+    printf '%s\n' '/usr/bin/bash -e job-started-dispatch.sh'
+  else
+    printf '%s\n' '/runner/bin/Runner.Worker spawnclient 1 2'
+  fi
+elif [[ "$*" == *'ppid='* ]]; then
+  printf '%s\n' "${RUNNERCTL_TEST_WORKER_PID:?}"
+else
+  exit 1
+fi
+EOF_PS
+chmod 0755 "$tmp/bin/ps"
+RUNNERCTL_TEST_DIRECT_PID="$$" RUNNERCTL_TEST_WORKER_PID=424242 PATH="$tmp/bin:$PATH" "$start_a" >/dev/null
+ancestor_worker_pid="$(awk -F= '$1=="worker_pid" {print $2; exit}' "$RUNNERCTL_HOME/queue/slots/repo-a-01.slot")"
+[[ "$ancestor_worker_pid" == 424242 ]]
+"$end_a" >/dev/null
 
 # Stale slots whose worker process no longer exists are repaired on status.
 mkdir -p "$RUNNERCTL_HOME/queue/slots"
