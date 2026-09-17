@@ -50,19 +50,18 @@ harden_runner_hook(){
   [[ -f "$target" ]] || return 0
   max="$(max_wait_seconds)"
 
-  if grep -q '^# runnerctl legacy queue watchdog$' "$target" 2>/dev/null; then
-    return 0
-  fi
-  mv "$target" "$legacy"
+  if ! grep -q '^# runnerctl legacy queue watchdog$' "$target" 2>/dev/null || [[ ! -f "$legacy" ]]; then
+    mv "$target" "$legacy"
 
-  # The legacy hook records $PPID as the job worker PID. Once wrapped, its
-  # direct parent is the watchdog, which exits after admission. Preserve the
-  # watchdog's own parent (the real dispatcher/worker process) instead so stale
-  # slot recovery does not immediately reclaim a valid active slot.
-  patched="$legacy.tmp"
-  sed 's/"\$PPID"/"${RUNNERCTL_QUEUE_WORKER_PID:-$PPID}"/g' "$legacy" >"$patched"
-  mv "$patched" "$legacy"
-  chmod 0755 "$legacy"
+    # The legacy hook records $PPID as the job worker PID. Once wrapped, its
+    # direct parent is the watchdog, which exits after admission. Preserve the
+    # watchdog's own parent (the real dispatcher/worker process) instead so stale
+    # slot recovery does not immediately reclaim a valid active slot.
+    patched="$legacy.tmp"
+    sed 's/"\$PPID"/"${RUNNERCTL_QUEUE_WORKER_PID:-$PPID}"/g' "$legacy" >"$patched"
+    mv "$patched" "$legacy"
+    chmod 0755 "$legacy"
+  fi
 
   cat >"$target" <<EOF
 #!/usr/bin/env bash
@@ -92,7 +91,10 @@ cleanup(){
 trap 'cleanup; exit 143' TERM
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 129' HUP
-RUNNERCTL_QUEUE_WORKER_PID="\$PPID" "\$legacy" "\$@" &
+# Capture the real Runner.Worker parent before backgrounding. Bash can expose
+# the watchdog PID as PPID in the asynchronous child otherwise.
+worker_pid="\$PPID"
+RUNNERCTL_QUEUE_WORKER_PID="\$worker_pid" "\$legacy" "\$@" &
 child=\$!
 started=\$(date +%s)
 while child_running; do
@@ -151,7 +153,7 @@ This command blocks inside the GitHub runner job-start hook after GitHub has
 already assigned the job. Waiting jobs therefore appear as "in progress", and
 the waiting time can consume part of `timeout-minutes`.
 
-v0.7.3 safety behavior:
+v0.7.4 safety behavior:
   - cancellation signals terminate the hidden wait and clean local wait/slot state
   - waits are bounded (default 300 seconds)
   - override before `queue enable` with RUNNERCTL_QUEUE_MAX_WAIT_SECONDS=N

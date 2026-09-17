@@ -53,6 +53,11 @@ queue status --json | node -e 'const fs=require("fs");const x=JSON.parse(fs.read
 
 "$start_a" >/dev/null
 [[ -f "$RUNNERCTL_HOME/queue/slots/repo-a-01.slot" ]]
+slot_worker_pid="$(awk -F= '$1=="worker_pid" {print $2; exit}' "$RUNNERCTL_HOME/queue/slots/repo-a-01.slot")"
+[[ "$slot_worker_pid" == "$$" ]]
+kill -0 "$slot_worker_pid" 2>/dev/null
+grep -q 'worker_pid="\$PPID"' "$start_a"
+grep -q 'RUNNERCTL_QUEUE_WORKER_PID="\$worker_pid"' "$start_a"
 
 # A cancelled GitHub job must terminate the hidden legacy wait and clean state.
 "$start_b" >/dev/null 2>"$tmp/cancel.err" &
