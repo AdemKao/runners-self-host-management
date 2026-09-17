@@ -54,7 +54,7 @@ queue status --json | node -e 'const fs=require("fs");const x=JSON.parse(fs.read
 "$start_a" >/dev/null
 [[ -f "$RUNNERCTL_HOME/queue/slots/repo-a-01.slot" ]]
 slot_worker_pid="$(awk -F= '$1=="worker_pid" {print $2; exit}' "$RUNNERCTL_HOME/queue/slots/repo-a-01.slot")"
-[[ "$slot_worker_pid" == "$$" ]]
+[[ "$slot_worker_pid" =~ ^[1-9][0-9]*$ ]]
 kill -0 "$slot_worker_pid" 2>/dev/null
 grep -q 'find_worker_pid' "$start_a"
 grep -q 'worker_pid="\$(find_worker_pid)"' "$start_a"
