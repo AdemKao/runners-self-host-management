@@ -15,16 +15,26 @@ usage(){
 Manage automatic self-hosted runner workspace cleanup.
 
 Usage:
-  runnerctl cleanup status [RUNNER] [--json]
+  runnerctl cleanup status [RUNNER] [--json] [--sizes] [--timeout SECONDS]
   runnerctl cleanup enable RUNNER
   runnerctl cleanup enable-all
   runnerctl cleanup disable RUNNER
   runnerctl cleanup run RUNNER [--dry-run]
 
-The post-job hook deletes only GITHUB_WORKSPACE. Package-manager caches,
+Status does not traverse workspaces unless --sizes is given (default timeout 5s).
+The post-job hook uses Python 3.8+ and deletes only validated GITHUB_WORKSPACE,
+with a 30-second bound. Package-manager caches,
 Docker data, and runner logs are preserved. runnerctl composes cleanup with
 other runnerctl-managed completion hooks such as the global queue.
 EOF
+}
+
+storage_helper(){
+  local p
+  for p in "$SCRIPT_DIR/runnerctl-storage.py" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-storage.py"; do
+    [[ -f "$p" ]] && { printf '%s' "$p"; return; }
+  done
+  die "storage helper missing; reinstall runnerctl"
 }
 
 runner_dir(){ printf '%s/%s' "$RUNNERS_DIR" "$1"; }
@@ -66,7 +76,9 @@ restart_service(){
 }
 
 write_hook(){
-  local n="$1" d="$2" h root
+  local n="$1" d="$2" h root helper
+  command -v python3 >/dev/null 2>&1 || die "cleanup requires Python 3.8+"
+  helper="$(storage_helper)"
   h="$(hook_path "$n")"; root="$d/_work"
   mkdir -p "$(dirname "$h")"
   cat >"$h" <<EOF
@@ -77,10 +89,7 @@ root="$root"
 [[ -n "\$workspace" ]] || exit 0
 case "\$workspace" in "\$root"/*) ;; *) printf '[runnerctl-cleanup] refusing path: %s\\n' "\$workspace" >&2; exit 0;; esac
 [[ -d "\$workspace" ]] || exit 0
-before="\$(du -sk "\$workspace" 2>/dev/null | awk '{print \$1}' || printf 0)"
-find "\$workspace" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || printf '[runnerctl-cleanup] partial cleanup failure\\n' >&2
-after="\$(du -sk "\$workspace" 2>/dev/null | awk '{print \$1}' || printf 0)"
-printf '[runnerctl-cleanup] cleaned %s (before=%sKB after=%sKB)\\n' "\$workspace" "\$before" "\$after"
+python3 "$helper" _workspace "$d" "\$workspace" --apply --timeout 30 || printf '[runnerctl-cleanup] refused or incomplete\\n' >&2
 exit 0
 EOF
   chmod 0755 "$h"
@@ -110,25 +119,25 @@ workspace(){
   name="${repo#*/}"; printf '%s/_work/%s/%s' "$d" "$name" "$name"
 }
 
-workspace_kb(){
-  local w; w="$(workspace "$1" 2>/dev/null || true)"
-  [[ -d "$w" ]] && du -sk "$w" 2>/dev/null | awk '{print $1}' || printf 0
-}
-
 status_one(){
-  local n="$1" json="$2" d h hooks enabled=false kb
-  d="$(require_runner "$n")"; h="$(hook_path "$n")"; hooks="$(find_hooks_helper)"; kb="$(workspace_kb "$d")"
+  local n="$1" json="$2" d h hooks enabled=false kb=null scan=not-requested result
+  d="$(require_runner "$n")"; h="$(hook_path "$n")"; hooks="$(find_hooks_helper)"
+  if [[ "$SIZES" == 1 ]]; then
+    result="$(python3 "$(storage_helper)" _size "$(workspace "$d")" --timeout "$SCAN_TIMEOUT")"
+    kb="$(printf '%s' "$result" | python3 -c 'import json,sys;x=json.load(sys.stdin);print("null" if x["workspace_kb"] is None else x["workspace_kb"])')"
+    scan="$(printf '%s' "$result" | python3 -c 'import json,sys;print(json.load(sys.stdin)["scan_status"])')"
+  fi
   if [[ -f "$h" ]] && RUNNERCTL_HOME="$RUNNERCTL_HOME" bash "$hooks" has "$n" completed cleanup >/dev/null 2>&1; then enabled=true; fi
   if [[ "$json" -eq 1 ]]; then
-    printf '{"name":"%s","enabled":%s,"workspace_kb":%s}\n' "$n" "$enabled" "$kb"
+    printf '{"name":"%s","enabled":%s,"workspace_kb":%s,"scan_status":"%s"}\n' "$n" "$enabled" "$kb" "$scan"
   else
-    printf '%-38s %-10s %sKB\n' "$n" "$([[ "$enabled" == true ]] && echo enabled || echo disabled)" "$kb"
+    printf '%-38s %-10s %sKB (%s)\n' "$n" "$([[ "$enabled" == true ]] && echo enabled || echo disabled)" "$kb" "$scan"
   fi
 }
 
 status_all(){
   local json="$1" d first=1
-  mkdir -p "$RUNNERS_DIR"; shopt -s nullglob
+  shopt -s nullglob
   if [[ "$json" -eq 1 ]]; then
     printf '{"runners":['
     for d in "$RUNNERS_DIR"/*; do
@@ -144,17 +153,18 @@ status_all(){
 }
 
 run_one(){
-  local n="$1" dry="$2" d w kb
-  d="$(require_runner "$n")"; w="$(workspace "$d")" || die "Cannot resolve workspace for $n"; kb="$(workspace_kb "$d")"
-  [[ "$dry" -eq 0 ]] || { printf '%s\t%sKB\n' "$w" "$kb"; return; }
+  local n="$1" dry="$2" d w
+  d="$(require_runner "$n")"; w="$(workspace "$d")" || die "Cannot resolve workspace for $n"
+  [[ "$dry" -eq 0 ]] || { python3 "$(storage_helper)" _workspace "$d" "$w"; return; }
   [[ -d "$w" ]] || { info "Workspace already absent: $w"; return; }
-  find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-  info "Workspace cleaned: $w (${kb}KB before cleanup)"
+  [[ "${RUNNERCTL_CLEANUP_IDLE_CONFIRMED:-0}" == 1 ]] || die "manual cleanup requires RUNNERCTL_CLEANUP_IDLE_CONFIRMED=1 after verifying this runner is idle"
+  python3 "$(storage_helper)" _workspace "$d" "$w" --apply --timeout 30
 }
 
 main(){
   local cmd="${1:-status}" name="" json=0 dry=0 d
   shift || true
+  SIZES=0; SCAN_TIMEOUT=5
   case "$cmd" in
     help|--help|-h) usage ;;
     enable) [[ $# -eq 1 ]] || die "cleanup enable requires RUNNER"; enable_one "$1" ;;
@@ -172,7 +182,7 @@ main(){
       ;;
     status)
       while [[ $# -gt 0 ]]; do
-        case "$1" in --json) json=1 ;; *) [[ -z "$name" ]] || die "only one RUNNER allowed"; name="$1" ;; esac
+        case "$1" in --json) json=1 ;; --sizes) SIZES=1 ;; --timeout) [[ $# -ge 2 ]] || die "--timeout requires seconds"; SCAN_TIMEOUT="$2"; shift ;; --*) die "unknown status option" ;; *) [[ -z "$name" ]] || die "only one RUNNER allowed"; name="$1" ;; esac
         shift
       done
       [[ -n "$name" ]] && status_one "$name" "$json" || status_all "$json"

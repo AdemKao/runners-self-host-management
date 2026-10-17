@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-18
+
+### Added
+- `runnerctl storage inspect` for read-only free-space and inode reporting without a policy file.
+- `runnerctl storage check` for policy-based admission, exiting non-zero when a declared reserve is unmet.
+- `runnerctl storage plan` and `runnerctl storage gc` for preview-first, scoped maintenance of expired
+  runner diagnostic logs and an explicitly named buildx builder cache.
+- `runnerctl agent --json` entries for the new storage commands, plus `docs/storage.md`.
+
+### Changed
+- `cleanup status` no longer walks workspace trees by default; use `--sizes` with an optional
+  `--timeout SECONDS`, and report unmeasured workspaces as `null` plus a `scan_status`.
+- The post-job cleanup hook moved into the storage helper: Python 3.8+ is required, the workspace must
+  resolve to `<runner>/_work/<owner>/<repo>`, and removal is bounded to 30 seconds.
+- Manual `cleanup run RUNNER` requires `RUNNERCTL_CLEANUP_IDLE_CONFIRMED=1`.
+
+### Safety
+- No global prune path exists. Volumes, images, containerd content, package caches, workspaces, and
+  backups are never removed, and shared `default`/`desktop-linux` builders are refused.
+- Log deletion retains the newest two files of each kind, re-validates identity before unlinking, and
+  fsyncs an audit record per removal. Invalid policies are refused without echoing their contents.
+
 ## [0.7.5] - 2026-09-17
 
 ### Fixed
@@ -267,7 +289,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The project began with the initial `runnerctl` implementation for managing multiple GitHub Actions self-hosted runners on one host, including runner registration, service lifecycle management, logs, removal, environment diagnostics, installation tooling, CI, and local isolation guidance.
 
-[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/AdemKao/runners-self-host-management/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.8.0
 [0.7.5]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.5
 [0.7.4]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.4
 [0.7.3]: https://github.com/AdemKao/runners-self-host-management/releases/tag/v0.7.3

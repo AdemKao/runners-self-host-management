@@ -57,11 +57,21 @@ find_cleanup_helper() {
   exit 1
 }
 
+find_storage_helper() {
+  local candidate
+  for candidate in "$SCRIPT_DIR/bin/runnerctl-storage.py" "$SCRIPT_DIR/../libexec/runnerctl/runnerctl-storage.py"; do
+    [[ -f "$candidate" ]] && { printf '%s' "$candidate"; return; }
+  done
+  printf 'runnerctl: storage helper missing; reinstall runnerctl\n' >&2
+  return 1
+}
+
 append_root_cleanup_help() {
   cat <<'EOF'
 
 Disk hygiene:
   cleanup        Manage automatic post-job workspace cleanup
+  storage        Inspect/check disk reserves and preview scoped maintenance
 
 Use "runnerctl cleanup --help" for cleanup commands.
 EOF
@@ -81,11 +91,21 @@ append_agent_cleanup_help() {
   cat <<'EOF'
 
 Runner cleanup:
-  cleanup status       read-only disk/workspace inspection
+  cleanup status       read-only configuration and workspace inspection
   cleanup enable       mutates local runner config and restarts the service
   cleanup enable-all   mutates all managed runner configs/services
   cleanup disable      removes runnerctl's completion hook and restarts service
   cleanup run          manually removes the selected runner workspace
+
+Host storage:
+  storage inspect      read-only free-space and inode report for given paths
+  storage check        read-only admission check against a policy file
+  storage plan         read-only preview of scoped maintenance
+  storage gc           applies a policy; requires --apply and --audit
+
+`cleanup status` does not traverse workspaces unless `--sizes` is passed.
+`storage gc` never removes volumes, images, package caches, or containerd
+content, and never runs a global `docker system prune`.
 
 For unattended automation, prefer `runnerctl cleanup status --json` first.
 EOF
@@ -131,6 +151,10 @@ agent_json_with_cleanup() {
       print "    \"cleanup enable-all\": {\"effect\": \"mutating-local-config-and-service-bulk\"},"
       print "    \"cleanup disable\": {\"effect\": \"mutating-local-config-and-service\"},"
       print "    \"cleanup run\": {\"effect\": \"destructive-workspace\"},"
+      print "    \"storage inspect\": {\"effect\": \"read-only\", \"json\": true},"
+      print "    \"storage check\": {\"effect\": \"read-only\", \"json\": true},"
+      print "    \"storage plan\": {\"effect\": \"read-only\", \"json\": true},"
+      print "    \"storage gc\": {\"effect\": \"destructive-log-retention-and-scoped-builder-gc\", \"json\": true},"
       added=1
       next
     }
@@ -525,6 +549,12 @@ main() {
         return
       fi
       exec bash "$helper" "$@"
+      ;;
+    storage)
+      shift
+      command -v python3 >/dev/null 2>&1 || { printf 'runnerctl: storage requires Python 3.8+\n' >&2; return 1; }
+      helper="$(find_storage_helper)"
+      exec python3 "$helper" "$@"
       ;;
     doctor)
       if [[ "${2:-}" == "--help" || "${2:-}" == "-h" || "${2:-}" == "help" ]]; then

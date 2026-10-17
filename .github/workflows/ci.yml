@@ -43,6 +43,7 @@ jobs:
           bash -n bin/runnerctl-notify-provider-webhook
           bash -n bin/runnerctl-bot
           python3 -m py_compile bin/runnerctl-bot-controller.py tests/test_bot_controller.py
+          python3 -m py_compile bin/runnerctl-storage.py tests/storage.py
           bash -n install.sh
           bash -n install-legacy.sh
           bash -n scripts/package-release.sh
@@ -76,6 +77,9 @@ jobs:
 
       - name: Run cleanup regression tests
         run: bash tests/cleanup.sh
+
+      - name: Run storage regression tests
+        run: python3 tests/storage.py
 
       - name: Run doctor regression tests
         run: bash tests/doctor.sh

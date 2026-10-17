@@ -12,6 +12,7 @@ install -m 0755 "$ROOT/runnerctl-base-legacy" "$DIST_DIR/runnerctl-base-legacy"
 install -m 0755 "$ROOT/bin/runnerctl" "$DIST_DIR/runnerctl-core"
 install -m 0755 "$ROOT/bin/runnerctl-legacy" "$DIST_DIR/runnerctl-core-legacy"
 install -m 0755 "$ROOT/bin/runnerctl-cleanup" "$DIST_DIR/runnerctl-cleanup"
+install -m 0755 "$ROOT/bin/runnerctl-storage.py" "$DIST_DIR/runnerctl-storage.py"
 install -m 0755 "$ROOT/bin/runnerctl-host" "$DIST_DIR/runnerctl-host"
 install -m 0755 "$ROOT/bin/runnerctl-ci" "$DIST_DIR/runnerctl-ci"
 install -m 0755 "$ROOT/bin/runnerctl-hooks" "$DIST_DIR/runnerctl-hooks"
@@ -31,11 +32,11 @@ done
 # Source-compatible tarball plus compatibility implementations used by v0.7 wrappers.
 tar -czf "$DIST_DIR/runnerctl-${VERSION}.tar.gz" -C "$ROOT" \
   runnerctl runnerctl-base runnerctl-base-v06 runnerctl-base-v05 runnerctl-base-legacy \
-  bin/runnerctl bin/runnerctl-legacy bin/runnerctl-cleanup bin/runnerctl-host bin/runnerctl-ci bin/runnerctl-hooks \
+  bin/runnerctl bin/runnerctl-legacy bin/runnerctl-cleanup bin/runnerctl-storage.py bin/runnerctl-host bin/runnerctl-ci bin/runnerctl-hooks \
   bin/runnerctl-queue bin/runnerctl-queue-legacy bin/runnerctl-scheduler bin/runnerctl-scheduler-core \
   bin/runnerctl-notify bin/runnerctl-notify-provider-telegram bin/runnerctl-notify-provider-line bin/runnerctl-notify-provider-webhook \
   bin/runnerctl-bot bin/runnerctl-bot-controller.py \
   install.sh install-legacy.sh
 checksum(){ local file="$1" hash; if command -v sha256sum >/dev/null 2>&1; then hash="$(sha256sum "$file" | awk '{print $1}')"; elif command -v shasum >/dev/null 2>&1; then hash="$(shasum -a 256 "$file" | awk '{print $1}')"; else echo "sha256sum or shasum is required" >&2; exit 1; fi; printf '%s  %s\n' "$hash" "$(basename "$file")"; }
-for artifact in runnerctl runnerctl-base runnerctl-base-v06 runnerctl-base-v05 runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook runnerctl-bot runnerctl-bot-controller.py "runnerctl-${VERSION}.tar.gz"; do checksum "$DIST_DIR/$artifact" >"$DIST_DIR/$artifact.sha256"; done
+for artifact in runnerctl runnerctl-base runnerctl-base-v06 runnerctl-base-v05 runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-storage.py runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook runnerctl-bot runnerctl-bot-controller.py "runnerctl-${VERSION}.tar.gz"; do checksum "$DIST_DIR/$artifact" >"$DIST_DIR/$artifact.sha256"; done
 printf 'Created release artifacts in %s\n' "$DIST_DIR"
