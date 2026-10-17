@@ -15,6 +15,7 @@ on:
       - 'bin/runnerctl'
       - 'bin/runnerctl-legacy'
       - 'bin/runnerctl-cleanup'
+      - 'bin/runnerctl-storage.py'
       - 'bin/runnerctl-host'
       - 'bin/runnerctl-ci'
       - 'bin/runnerctl-hooks'
@@ -92,6 +93,8 @@ jobs:
           bash tests/installer.sh
           bash tests/scheduler.sh
           bash tests/notify.sh
+          bash tests/cleanup.sh
+          python3 tests/storage.py
           python3 tests/test_bot_controller.py
 
       - name: Publish npm package
@@ -154,6 +157,7 @@ jobs:
             dist/runnerctl-core dist/runnerctl-core.sha256 \
             dist/runnerctl-core-legacy dist/runnerctl-core-legacy.sha256 \
             dist/runnerctl-cleanup dist/runnerctl-cleanup.sha256 \
+            dist/runnerctl-storage.py dist/runnerctl-storage.py.sha256 \
             dist/runnerctl-host dist/runnerctl-host.sha256 \
             dist/runnerctl-ci dist/runnerctl-ci.sha256 \
             dist/runnerctl-hooks dist/runnerctl-hooks.sha256 \

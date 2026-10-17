@@ -15,6 +15,7 @@ class Runnerctl < Formula
     libexec.install "bin/runnerctl" => "runnerctl-core"
     libexec.install "bin/runnerctl-legacy" => "runnerctl-core-legacy"
     libexec.install "bin/runnerctl-cleanup" => "runnerctl-cleanup"
+    libexec.install "bin/runnerctl-storage.py" => "runnerctl-storage.py"
     libexec.install "bin/runnerctl-host" => "runnerctl-host"
     libexec.install "bin/runnerctl-ci" => "runnerctl-ci"
     libexec.install "bin/runnerctl-hooks" => "runnerctl-hooks"
@@ -29,7 +30,7 @@ class Runnerctl < Formula
     libexec.install "bin/runnerctl-bot" => "runnerctl-bot"
     libexec.install "bin/runnerctl-bot-controller.py" => "runnerctl-bot-controller.py"
 
-    %w[runnerctl-frontend runnerctl-base runnerctl-base-v06 runnerctl-base-v05 runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook runnerctl-bot runnerctl-bot-controller.py].each do |name|
+    %w[runnerctl-frontend runnerctl-base runnerctl-base-v06 runnerctl-base-v05 runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-storage.py runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook runnerctl-bot runnerctl-bot-controller.py].each do |name|
       chmod 0755, libexec/name
     end
 
@@ -47,7 +48,7 @@ class Runnerctl < Formula
   end
 
   test do
-    assert_equal "0.7.5", shell_output("#{bin}/runnerctl version").strip
+    assert_equal "0.8.0", shell_output("#{bin}/runnerctl version").strip
     assert_match "AI AGENT", shell_output("#{bin}/runnerctl --help")
     assert_match "GitHub-native scheduling", shell_output("#{bin}/runnerctl --help")
     assert_match "Notifications and integrations", shell_output("#{bin}/runnerctl --help")
@@ -56,6 +57,6 @@ class Runnerctl < Formula
     assert_match "GitHub-native scheduler", shell_output("#{bin}/runnerctl scheduler --help")
     assert_match "Notification providers", shell_output("#{bin}/runnerctl notify providers")
     assert_match '"enabled":false', shell_output("#{bin}/runnerctl scheduler status --json")
-    assert_match '"current_version":"0.7.5"', shell_output("RUNNERCTL_LATEST_VERSION=0.7.5 RUNNERCTL_INSTALL_METHOD=homebrew #{bin}/runnerctl upgrade --check --json")
+    assert_match '"current_version":"0.8.0"', shell_output("RUNNERCTL_LATEST_VERSION=0.8.0 RUNNERCTL_INSTALL_METHOD=homebrew #{bin}/runnerctl upgrade --check --json")
   end
 end

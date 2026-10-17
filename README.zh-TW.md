@@ -359,6 +359,48 @@ Docker Compose 建議每個 workflow run 使用不同 project name：
 docker compose -p "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" up -d
 ```
 
+## 磁碟衛生與容量管理
+
+`cleanup` 只會刪除 `GITHUB_WORKSPACE`。Docker images 與 build cache 通常在
+`/var/lib/docker` 與 `/var/lib/containerd`，獨立的 runner data volume 並不包含
+它們，所以兩個位置都要檢查：
+
+```bash
+runnerctl storage inspect --path /
+runnerctl storage inspect --path / --path /srv/data
+```
+
+用保留空間做進站准入：
+
+```bash
+runnerctl storage check --policy /etc/runnerctl/storage.json --json
+```
+
+任一檔案系統未達最低可用空間、使用率或可用 inode 保留值時，`check` 以 exit 3
+結束，可直接用作 pre-job hook 或 scheduler gate。
+
+先預覽，再套用範圍明確的維護：
+
+```bash
+runnerctl storage plan --policy /etc/runnerctl/storage.json
+runnerctl storage gc --policy /etc/runnerctl/storage.json --apply --audit /var/log/runnerctl-storage.jsonl
+```
+
+`runnerctl storage` 沒有全域清理指令，永遠不會執行 `docker system prune` 或任何
+`docker * prune`，也不會刪除 volumes、images、containerd 內容、package caches、
+workspaces 與 backups。可選的 builder GC 只作用於 policy 指定的那一個 builder，
+並拒絕共用的 `default` 與 `desktop-linux`。Log 保留每個 runner 最新兩份
+`Runner_*.log` 與 `Worker_*.log`，且每次刪除都寫入 audit 紀錄。
+
+`cleanup status` 預設不再量測 workspace 大小：
+
+```bash
+runnerctl cleanup status example-runner-01 --json            # 只看設定
+runnerctl cleanup status example-runner-01 --json --sizes    # 有上限的量測
+```
+
+policy 格式與上線步驟請見 [docs/storage.md](docs/storage.md)。
+
 ## 安全性
 
 Self-hosted runner 會直接在主機上執行 workflow code。只有可信任的 repository 與 workflow 才應連到含有重要 credentials 或資料的 runner host。

@@ -425,6 +425,49 @@ docker compose -p "ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" up -d
 
 Avoid fixed host ports and globally named resources when jobs can run concurrently.
 
+## Disk hygiene and storage
+
+Workspace cleanup only removes `GITHUB_WORKSPACE`. Docker images and build cache
+usually live in `/var/lib/docker` and `/var/lib/containerd`, which a separate
+runner data volume does not bound, so inspect both:
+
+```bash
+runnerctl storage inspect --path /
+runnerctl storage inspect --path / --path /srv/data
+```
+
+Gate new work on declared reserves:
+
+```bash
+runnerctl storage check --policy /etc/runnerctl/storage.json --json
+```
+
+`check` exits `3` when a filesystem misses its minimum free bytes, used-percent,
+or free-inode reserve, which makes it usable as a pre-job hook or scheduler gate.
+
+Preview, then apply scoped maintenance:
+
+```bash
+runnerctl storage plan --policy /etc/runnerctl/storage.json
+runnerctl storage gc --policy /etc/runnerctl/storage.json --apply --audit /var/log/runnerctl-storage.jsonl
+```
+
+`runnerctl storage` has no global cleanup command. It never runs `docker system
+prune` or any `docker * prune`, and never removes volumes, images, containerd
+content, package caches, workspaces, or backups. Optional builder GC applies only
+to one builder named in the policy, and refuses shared `default` and
+`desktop-linux` builders. Log retention keeps the newest two `Runner_*.log` and
+`Worker_*.log` files per runner and writes an audit record for every deletion.
+
+`cleanup status` no longer measures workspace sizes by default:
+
+```bash
+runnerctl cleanup status example-runner-01 --json            # configuration only
+runnerctl cleanup status example-runner-01 --json --sizes    # bounded measurement
+```
+
+See [docs/storage.md](docs/storage.md) for the policy format and rollout.
+
 ## Security
 
 Self-hosted runners execute workflow code directly on the host. Attach only trusted repositories and workflows to machines containing valuable credentials or data.

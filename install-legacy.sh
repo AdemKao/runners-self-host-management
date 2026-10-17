@@ -24,6 +24,7 @@ if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
   LOCAL_BASE="$SCRIPT_DIR/runnerctl-base"
   LOCAL_CORE="$SCRIPT_DIR/bin/runnerctl"
   LOCAL_CLEANUP="$SCRIPT_DIR/bin/runnerctl-cleanup"
+  LOCAL_STORAGE="$SCRIPT_DIR/bin/runnerctl-storage.py"
   LOCAL_HOST="$SCRIPT_DIR/bin/runnerctl-host"
   LOCAL_CI="$SCRIPT_DIR/bin/runnerctl-ci"
   LOCAL_HOOKS="$SCRIPT_DIR/bin/runnerctl-hooks"
@@ -49,12 +50,14 @@ install_helper() {
 }
 
 install_files() {
-  local frontend="$1" base="$2" core="$3" cleanup="$4" host="${5:-}" ci="${6:-}" hooks="${7:-}" queue="${8:-}"
+  local frontend="$1" base="$2" core="$3" cleanup="$4" host="${5:-}" ci="${6:-}" hooks="${7:-}" queue="${8:-}" storage="${9:-}"
   mkdir -p "$BIN_DIR" "$LIBEXEC_DIR" "$LIBEXEC_BIN_DIR"
   install -m 0755 "$frontend" "$BIN_DIR/runnerctl"
   install -m 0755 "$base" "$LIBEXEC_DIR/runnerctl-base"
   install -m 0755 "$core" "$LIBEXEC_DIR/runnerctl-core"
   install -m 0755 "$cleanup" "$LIBEXEC_DIR/runnerctl-cleanup"
+  # The cleanup helper resolves the storage helper from its own directory.
+  [[ -z "$storage" ]] || install -m 0755 "$storage" "$LIBEXEC_DIR/runnerctl-storage.py"
 
   # Keep the historical flattened helper paths while also preserving the source
   # layout expected by runnerctl-base ($SCRIPT_DIR/bin/runnerctl-*).
@@ -80,9 +83,9 @@ install_legacy_binary() {
 }
 
 install_from_checkout() {
-  [[ -f "$LOCAL_FRONTEND" && -f "$LOCAL_BASE" && -f "$LOCAL_CORE" && -f "$LOCAL_CLEANUP" && -f "$LOCAL_HOST" && -f "$LOCAL_CI" && -f "$LOCAL_HOOKS" && -f "$LOCAL_QUEUE" ]] || return 1
+  [[ -f "$LOCAL_FRONTEND" && -f "$LOCAL_BASE" && -f "$LOCAL_CORE" && -f "$LOCAL_CLEANUP" && -f "$LOCAL_STORAGE" && -f "$LOCAL_HOST" && -f "$LOCAL_CI" && -f "$LOCAL_HOOKS" && -f "$LOCAL_QUEUE" ]] || return 1
   info "Installing from local checkout"
-  install_files "$LOCAL_FRONTEND" "$LOCAL_BASE" "$LOCAL_CORE" "$LOCAL_CLEANUP" "$LOCAL_HOST" "$LOCAL_CI" "$LOCAL_HOOKS" "$LOCAL_QUEUE"
+  install_files "$LOCAL_FRONTEND" "$LOCAL_BASE" "$LOCAL_CORE" "$LOCAL_CLEANUP" "$LOCAL_HOST" "$LOCAL_CI" "$LOCAL_HOOKS" "$LOCAL_QUEUE" "$LOCAL_STORAGE"
 }
 
 verify_sha256() {
@@ -104,7 +107,7 @@ download_verified() {
 }
 
 install_from_release() {
-  local version="$1" base tmp host="" ci="" hooks="" queue=""
+  local version="$1" base tmp host="" ci="" hooks="" queue="" storage=""
   tmp="$(mktemp -d)"
   INSTALL_TMP_DIR="$tmp"
   base="https://github.com/$REPO/releases/download/v$version"
@@ -135,7 +138,11 @@ install_from_release() {
       if curl -fsSL "$base/runnerctl-queue" -o "$tmp/runnerctl-queue" 2>/dev/null; then
         curl -fsSL "$base/runnerctl-queue.sha256" -o "$tmp/runnerctl-queue.sha256"; verify_sha256 "$tmp" runnerctl-queue.sha256; queue="$tmp/runnerctl-queue"
       fi
-      install_files "$tmp/runnerctl" "$tmp/runnerctl-base" "$tmp/runnerctl-core" "$tmp/runnerctl-cleanup" "$host" "$ci" "$hooks" "$queue"
+      if curl -fsSL "$base/runnerctl-storage.py" -o "$tmp/runnerctl-storage.py" 2>/dev/null; then
+        curl -fsSL "$base/runnerctl-storage.py.sha256" -o "$tmp/runnerctl-storage.py.sha256"
+        verify_sha256 "$tmp" runnerctl-storage.py.sha256; storage="$tmp/runnerctl-storage.py"
+      fi
+      install_files "$tmp/runnerctl" "$tmp/runnerctl-base" "$tmp/runnerctl-core" "$tmp/runnerctl-cleanup" "$host" "$ci" "$hooks" "$queue" "$storage"
     else
       info "Release v$version uses the pre-cleanup frontend/core layout"
       install_legacy_pair "$tmp/runnerctl" "$tmp/runnerctl-core"
@@ -161,7 +168,8 @@ install_from_ref() {
   curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-ci" -o "$tmp/runnerctl-ci"
   curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-hooks" -o "$tmp/runnerctl-hooks"
   curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-queue" -o "$tmp/runnerctl-queue"
-  install_files "$tmp/runnerctl" "$tmp/runnerctl-base" "$tmp/runnerctl-core" "$tmp/runnerctl-cleanup" "$tmp/runnerctl-host" "$tmp/runnerctl-ci" "$tmp/runnerctl-hooks" "$tmp/runnerctl-queue"
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/bin/runnerctl-storage.py" -o "$tmp/runnerctl-storage.py"
+  install_files "$tmp/runnerctl" "$tmp/runnerctl-base" "$tmp/runnerctl-core" "$tmp/runnerctl-cleanup" "$tmp/runnerctl-host" "$tmp/runnerctl-ci" "$tmp/runnerctl-hooks" "$tmp/runnerctl-queue" "$tmp/runnerctl-storage.py"
   cleanup_install_tmp
 }
 

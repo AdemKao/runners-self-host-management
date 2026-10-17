@@ -43,8 +43,13 @@ handler="$tmp/data/hooks/example-runner-01/completed.d/cleanup.sh"
 [[ -x "$handler" ]]
 grep -Fq "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$dispatcher" "$runner/.env"
 
-node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.enabled || x.name!=="example-runner-01" || x.workspace_kb<=0) process.exit(1)' \
+# Default status must not traverse workspaces.
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(!x.enabled || x.name!=="example-runner-01" || x.workspace_kb!==null || x.scan_status!=="not-requested") process.exit(1)' \
   < <(run cleanup status example-runner-01 --json)
+
+# Explicit sizing returns a bounded measurement.
+node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(0,"utf8")); if(x.workspace_kb<=0 || x.scan_status!=="ok") process.exit(1)' \
+  < <(run cleanup status example-runner-01 --json --sizes)
 
 HOME="$tmp/home" GITHUB_WORKSPACE="$workspace" bash "$dispatcher" >/dev/null
 [[ -d "$workspace" ]]
@@ -53,8 +58,24 @@ HOME="$tmp/home" GITHUB_WORKSPACE="$workspace" bash "$dispatcher" >/dev/null
 
 printf 'again\n' > "$workspace/file.txt"
 run cleanup run example-runner-01 --dry-run | grep -q "$workspace"
-run cleanup run example-runner-01 >/dev/null
+# Manual deletion is refused unless the operator confirmed the runner is idle.
+if run cleanup run example-runner-01 >/dev/null 2>&1; then
+  echo "manual cleanup ran without an idle confirmation" >&2
+  exit 1
+fi
+[[ -e "$workspace/file.txt" ]]
+RUNNERCTL_CLEANUP_IDLE_CONFIRMED=1 run cleanup run example-runner-01 >/dev/null
 [[ ! -e "$workspace/file.txt" ]]
+
+# A workspace outside the runner's own _work tree is refused.
+outside="$tmp/data/runners/example-runner-01/other"
+mkdir -p "$outside"
+printf 'keep\n' > "$outside/file.txt"
+if python3 "$ROOT/bin/runnerctl-storage.py" _workspace "$runner" "$outside" --apply >/dev/null 2>&1; then
+  echo "out-of-tree workspace was accepted" >&2
+  exit 1
+fi
+[[ -f "$outside/file.txt" ]]
 
 run cleanup disable example-runner-01 >/dev/null
 ! grep -q '^ACTIONS_RUNNER_HOOK_JOB_COMPLETED=' "$runner/.env"

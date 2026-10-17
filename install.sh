@@ -20,6 +20,7 @@ local_checkout_ready(){
      -f "$SCRIPT_DIR/bin/runnerctl-scheduler-core" && -f "$SCRIPT_DIR/bin/runnerctl-notify" && \
      -f "$SCRIPT_DIR/bin/runnerctl-notify-provider-telegram" && -f "$SCRIPT_DIR/bin/runnerctl-notify-provider-line" && \
      -f "$SCRIPT_DIR/bin/runnerctl-notify-provider-webhook" && -f "$SCRIPT_DIR/bin/runnerctl-bot" && \
+     -f "$SCRIPT_DIR/bin/runnerctl-storage.py" && \
      -f "$SCRIPT_DIR/bin/runnerctl-bot-controller.py" ]]
 }
 fetch_legacy_installer(){

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="0.7.5"
+VERSION="0.8.0"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 DIST_DIR="$tmp/dist" bash "$ROOT/scripts/package-release.sh" >/dev/null
@@ -34,7 +34,7 @@ PATH="$tmp/bin:$PATH" RUNNERCTL_TEST_SOURCE_ROOT="$ROOT" RUNNERCTL_TEST_DIST="$t
 [[ ! -s "$tmp/install.err" ]]
 cli="$tmp/prefix/bin/runnerctl"; lib="$tmp/prefix/libexec/runnerctl"
 [[ "$($cli version)" == "$VERSION" ]]
-for f in runnerctl-base runnerctl-base-v06 runnerctl-base-v05 runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook runnerctl-bot runnerctl-bot-controller.py; do
+for f in runnerctl-base runnerctl-base-v06 runnerctl-base-v05 runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-storage.py runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook runnerctl-bot runnerctl-bot-controller.py; do
   [[ -x "$lib/$f" ]] || { echo "missing installed component: $f" >&2; exit 1; }
 done
 node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(0,"utf8"));if(x.enabled!==false)process.exit(1)' < <("$cli" scheduler status --json)
@@ -47,8 +47,8 @@ if command -v python3 >/dev/null 2>&1; then
   "$cli" bot --help >"$tmp/bot-help"; grep -q 'Read-only Telegram, LINE, and HTTP API controller' "$tmp/bot-help"
   "$cli" bot doctor --json | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["version"]=="0.7.0" and x["read_only"] is True'
 fi
-RUNNERCTL_LATEST_VERSION="$VERSION" RUNNERCTL_INSTALL_METHOD=shell "$cli" upgrade --check --json | node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(0,"utf8"));if(x.current_version!=="0.7.5"||x.update_available)process.exit(1)'
-for artifact in runnerctl runnerctl-base runnerctl-base-v06 runnerctl-base-v05 runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook runnerctl-bot runnerctl-bot-controller.py "runnerctl-$VERSION.tar.gz"; do
+RUNNERCTL_LATEST_VERSION="$VERSION" RUNNERCTL_INSTALL_METHOD=shell "$cli" upgrade --check --json | node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(0,"utf8"));if(x.current_version!=="0.8.0"||x.update_available)process.exit(1)'
+for artifact in runnerctl runnerctl-base runnerctl-base-v06 runnerctl-base-v05 runnerctl-base-legacy runnerctl-core runnerctl-core-legacy runnerctl-cleanup runnerctl-storage.py runnerctl-host runnerctl-ci runnerctl-hooks runnerctl-queue runnerctl-queue-legacy runnerctl-scheduler runnerctl-scheduler-core runnerctl-notify runnerctl-notify-provider-telegram runnerctl-notify-provider-line runnerctl-notify-provider-webhook runnerctl-bot runnerctl-bot-controller.py "runnerctl-$VERSION.tar.gz"; do
   [[ -f "$tmp/dist/$artifact.sha256" ]] || { echo "missing checksum: $artifact" >&2; exit 1; }
 done
 if command -v sha256sum >/dev/null 2>&1; then
@@ -56,4 +56,4 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   for f in "$tmp/dist"/*.sha256; do (cd "$tmp/dist" && shasum -a 256 -c "$(basename "$f")" >/dev/null); done
 fi
-echo "v0.7.5 installer tests passed"
+echo "v0.8.0 installer tests passed"
